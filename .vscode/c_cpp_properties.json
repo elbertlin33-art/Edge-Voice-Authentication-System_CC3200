@@ -1,0 +1,34 @@
+{
+    // IntelliSense config for the CC3200 project. Mirrors the include paths and
+    // defines in .cproject so VSCode resolves headers that live outside this folder.
+    // Build/flash still happens in CCS — this file only affects squiggles & jump-to-def.
+    //
+    // Paths are hard-coded to this machine's TI install:
+    //   CC3200 SDK : C:/ti/CC3200SDK_1.5.0/cc3200-sdk
+    //   ARM toolchain : C:/ti/ccs1260/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS
+    "version": 4,
+    "configurations": [
+        {
+            "name": "CC3200",
+            "includePath": [
+                "${workspaceFolder}",
+                "${workspaceFolder}/utils",
+                "C:/ti/ccs1260/ccs/tools/compiler/ti-cgt-arm_20.2.7.LTS/include",
+                "C:/ti/CC3200SDK_1.5.0/cc3200-sdk/driverlib",
+                "C:/ti/CC3200SDK_1.5.0/cc3200-sdk/inc",
+                "C:/ti/CC3200SDK_1.5.0/cc3200-sdk/example/common",
+                "C:/ti/CC3200SDK_1.5.0/cc3200-sdk/simplelink",
+                "C:/ti/CC3200SDK_1.5.0/cc3200-sdk/simplelink/source",
+                "C:/ti/CC3200SDK_1.5.0/cc3200-sdk/simplelink/include",
+                "C:/ti/CC3200SDK_1.5.0/cc3200-sdk/simplelink_extlib/provisioninglib"
+            ],
+            "defines": [
+                "ccs",
+                "cc3200"
+            ],
+            "cStandard": "c99",
+            "cppStandard": "c++14",
+            "intelliSenseMode": "windows-gcc-arm"
+        }
+    ]
+}

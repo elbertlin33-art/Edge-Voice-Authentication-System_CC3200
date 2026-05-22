@@ -1,0 +1,8 @@
+{
+    // Show "include not found" only when the C/C++ extension can't resolve them after
+    // checking c_cpp_properties.json — avoids red squiggle noise while you tune paths.
+    "C_Cpp.errorSquiggles": "enabledIfIncludesResolve",
+    "files.associations": {
+        "*.cmd": "plaintext"
+    }
+}

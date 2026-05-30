@@ -55,6 +55,9 @@ void UI_ShowState(UIState_t state, int user_id, int score)
         case UI_STATE_UPLOADING:
             UI_DisplayLines("Uploading", "Sending audio to cloud", "Please wait");
             break;
+        case UI_STATE_ENROLLING:
+            UI_DisplayLines("Enroll Mode", "Get ready", "Say your phrase");
+            break;
         case UI_STATE_PASS:
             snprintf(line1, sizeof(line1), "PASS: User %d", user_id);
             snprintf(line2, sizeof(line2), "%d%% similarity", score);

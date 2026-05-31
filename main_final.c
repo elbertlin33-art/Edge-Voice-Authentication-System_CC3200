@@ -34,8 +34,8 @@
 #include "mic_capture.h"
 #include "dsp_features.h"
 #include "cloud_client.h"
-#include "camila's function files/pir_sensor.h"
-#include "camila's function files/ui.h"
+#include "pir_sensor.h"
+#include "ui.h"
 
 #define APPLICATION_NAME        "Voice Auth"
 #define APPLICATION_VERSION     "Final"
@@ -213,7 +213,9 @@ static int RecordThreeSecondClip(void)
             want = RECORD_CHUNK_SAMPLES;
         }
 
-        captured = Mic_RecordSamples(gPcmChunk, RECORD_CHUNK_SAMPLES, want);
+        captured = (totalCaptured == 0)
+                 ? Mic_RecordSamples(gPcmChunk, RECORD_CHUNK_SAMPLES, want)
+                 : Mic_RecordMoreSamples(gPcmChunk, RECORD_CHUNK_SAMPLES, want);
         UART_PRINT("captured=%d\n\r", captured);
         if(captured <= 0) {
             UART_PRINT("Mic: chunk failed, captured=%d\n\r", captured);
@@ -388,6 +390,7 @@ void main()
             UART_PRINT("PIR: motion detected\n\r");
             HandleMotionEvent();
             App_ShowState(UI_STATE_IDLE, 0, 0);
+            UART_PRINT("PIR: signal after idle = %d\n\r", PIR_MotionDetected());
         } else {
             DelayMs(100);
         }

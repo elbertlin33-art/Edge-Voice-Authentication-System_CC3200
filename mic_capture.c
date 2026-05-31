@@ -294,6 +294,26 @@ static int Mic_RecordSamplesInternal(short *pcmOut,
 
     if(clearOldSamples) {
         Mic_ClearOldSamples();
+
+        /* Clear any I2S error flags (ROVRN, XUNDRN) that fired during idle.
+         * Without this, the I2S hardware stops issuing DMA requests. */
+        MAP_I2SIntClear(I2S_BASE, I2S_INT_RDMA | I2S_INT_XDMA |
+                                  I2S_INT_ROVRN | I2S_INT_RSYNCERR |
+                                  I2S_INT_XUNDRN | I2S_INT_XSYNCERR);
+
+        /* Force both DMA channels idle so re-setup doesn't corrupt in-flight transfers. */
+        MAP_uDMAChannelDisable(UDMA_CH4_I2S_RX);
+        MAP_uDMAChannelDisable(UDMA_CH5_I2S_TX);
+
+        /* Re-arm DMA descriptors from the current buffer write position. */
+        Mic_SetupRxDma();
+        Mic_SetupTxDma();
+
+        /* Software-kick both channels to drain the stale FIFO and prime the pipeline. */
+        MAP_uDMAChannelRequest(UDMA_CH4_I2S_RX);
+        MAP_uDMAChannelRequest(UDMA_CH5_I2S_TX);
+
+        UART_PRINT("Mic: DMA pipeline restarted\n\r");
     }
 
     /* Keep reading until the requested number of mono samples is captured. */

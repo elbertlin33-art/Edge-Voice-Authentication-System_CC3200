@@ -9,10 +9,23 @@ extern "C"
 typedef enum {
     CLOUD_COMMAND_AUTHENTICATE = 0,
     CLOUD_COMMAND_ENROLL,
-    CLOUD_COMMAND_CLEAR
+    CLOUD_COMMAND_CLEAR,
+    CLOUD_COMMAND_ERROR
 } CloudCommand_t;
 
+typedef struct {
+    CloudCommand_t command;
+    int ok;
+    int passed;
+    int userId;
+    int score;
+    char word[32];
+} CloudResult_t;
+
 int Cloud_Init(void);
+int Cloud_ProcessVoice(const short *pcm,
+                       unsigned long samples,
+                       CloudResult_t *result);
 CloudCommand_t Cloud_DetectCommand(const short *pcmA,
                                    unsigned long samplesA,
                                    const short *pcmB,

@@ -44,6 +44,10 @@
 #define RECORD_SAMPLES          (MIC_SAMPLE_RATE_HZ * RECORD_SECONDS)
 #define RECORD_CHUNK_SAMPLES    DSP_FFT_INPUT_SAMPLES
 #define RUN_BOOT_UPLOAD_TEST    1
+#define AUDIO_NOISY_AVG_ABS     14000
+#define AUDIO_NOISY_PEAK        62000
+#define AUDIO_QUIET_AVG_ABS     20
+#define AUDIO_QUIET_PEAK        1000
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- Start
@@ -72,8 +76,8 @@ static void BoardInit(void);
 static void OLED_SPIInit(void);
 static void DelayMs(unsigned long ms);
 static void App_ShowState(UIState_t state, int userId, int score);
+static int Audio_CheckSignal(const short *pcm, unsigned long samples);
 static int RecordThreeSecondClip(void);
-static void HandleEnrollEvent(void);
 static void HandleMotionEvent(void);
 
 //*****************************************************************************
@@ -167,6 +171,12 @@ static const char *StateName(UIState_t state)
             return "ENROLLED";
         case UI_STATE_CLEARED:
             return "CLEARED";
+        case UI_STATE_TOO_NOISY:
+            return "TOO_NOISY";
+        case UI_STATE_TOO_QUIET:
+            return "TOO_QUIET";
+        case UI_STATE_AWS_ERROR:
+            return "AWS_ERROR";
         default:
             return "UNKNOWN";
     }
@@ -186,6 +196,33 @@ static void App_ShowState(UIState_t state, int userId, int score)
 
     UART_PRINT("\n\r");
     UI_ShowState(state, userId, score);
+}
+
+static int Audio_CheckSignal(const short *pcm, unsigned long samples)
+{
+    tAudioStats stats;
+
+    DSP_GetAudioStats(pcm, samples, &stats);
+
+    UART_PRINT("Mic: min=%d max=%d peak_to_peak=%d avg_abs=%ld\n\r",
+               stats.min,
+               stats.max,
+               stats.peakToPeak,
+               stats.avgAbs);
+
+    if((stats.avgAbs < AUDIO_QUIET_AVG_ABS) ||
+       (stats.peakToPeak < AUDIO_QUIET_PEAK)) {
+        UART_PRINT("Audio: too quiet\n\r");
+        return UI_STATE_TOO_QUIET;
+    }
+
+    if((stats.avgAbs > AUDIO_NOISY_AVG_ABS) ||
+       (stats.peakToPeak > AUDIO_NOISY_PEAK)) {
+        UART_PRINT("Audio: too noisy\n\r");
+        return UI_STATE_TOO_NOISY;
+    }
+
+    return 0;
 }
 
 //*****************************************************************************
@@ -247,42 +284,6 @@ static int RecordThreeSecondClip(void)
 
 //*****************************************************************************
 //
-//! Run the apple/enroll path
-//!
-//! \param  None
-//!
-//! \return None
-//
-//*****************************************************************************
-static void HandleEnrollEvent(void)
-{
-    int samplesRecorded;
-    int userId = 0;
-
-    App_ShowState(UI_STATE_ENROLLING, 0, 0);
-    DelayMs(1000);
-
-    samplesRecorded = RecordThreeSecondClip();
-
-    App_ShowState(UI_STATE_UPLOADING, 0, 0);
-    DelayMs(1000);
-
-    if((samplesRecorded == RECORD_SAMPLES) &&
-       (Cloud_EnrollVoice(gPcmBuffer,
-                          RECORD_SAMPLES,
-                          0,
-                          0,
-                          &userId) == 0)) {
-        App_ShowState(UI_STATE_ENROLLED, userId, 0);
-    } else {
-        App_ShowState(UI_STATE_FAIL, 0, 0);
-    }
-
-    DelayMs(2000);
-}
-
-//*****************************************************************************
-//
 //! Run one voice-auth attempt after PIR motion
 //!
 //! \param  None
@@ -293,17 +294,13 @@ static void HandleEnrollEvent(void)
 static void HandleMotionEvent(void)
 {
     int samplesRecorded;
-    int userId = 0;
-    int score = 0;
-    CloudCommand_t command;
+    int audioProblem;
+    CloudResult_t cloudResult;
 
     App_ShowState(UI_STATE_GET_READY, 0, 0);
     DelayMs(1000);
 
     samplesRecorded = RecordThreeSecondClip();
-
-    App_ShowState(UI_STATE_UPLOADING, 0, 0);
-    DelayMs(1000);
 
     if(samplesRecorded != RECORD_SAMPLES) {
         App_ShowState(UI_STATE_FAIL, 0, 0);
@@ -311,30 +308,43 @@ static void HandleMotionEvent(void)
         return;
     }
 
-    command = Cloud_DetectCommand(gPcmBuffer,
-                                  RECORD_SAMPLES,
-                                  0,
-                                  0);
+    audioProblem = Audio_CheckSignal(gPcmBuffer, RECORD_SAMPLES);
+    if(audioProblem != 0) {
+        App_ShowState((UIState_t)audioProblem, 0, 0);
+        DelayMs(2000);
+        return;
+    }
 
-    if(command == CLOUD_COMMAND_ENROLL) {
-        HandleEnrollEvent();
-    } else if(command == CLOUD_COMMAND_CLEAR) {
-        Cloud_ClearProfiles();
+    App_ShowState(UI_STATE_UPLOADING, 0, 0);
+    DelayMs(1000);
+
+    if(Cloud_ProcessVoice(gPcmBuffer, RECORD_SAMPLES, &cloudResult) < 0) {
+        App_ShowState(UI_STATE_AWS_ERROR, 0, 0);
+        DelayMs(2000);
+        return;
+    }
+
+    UART_PRINT("Word detected: %s\n\r", cloudResult.word);
+    UI_ShowWord(cloudResult.word);
+    DelayMs(1500);
+
+    if(cloudResult.command == CLOUD_COMMAND_ENROLL) {
+        App_ShowState(UI_STATE_ENROLLED, cloudResult.userId, 0);
+        DelayMs(2000);
+    } else if(cloudResult.command == CLOUD_COMMAND_CLEAR) {
         App_ShowState(UI_STATE_CLEARED, 0, 0);
         DelayMs(2000);
-    } else {
+    } else if(cloudResult.command == CLOUD_COMMAND_AUTHENTICATE) {
         App_ShowState(UI_STATE_PROCESSING, 0, 0);
         DelayMs(1000);
-        if(Cloud_AuthenticateVoice(gPcmBuffer,
-                                   RECORD_SAMPLES,
-                                   0,
-                                   0,
-                                   &userId,
-                                   &score) == 0) {
-            App_ShowState(UI_STATE_PASS, userId, score);
+        if(cloudResult.passed) {
+            App_ShowState(UI_STATE_PASS, cloudResult.userId, cloudResult.score);
         } else {
             App_ShowState(UI_STATE_FAIL, 0, 0);
         }
+        DelayMs(2000);
+    } else {
+        App_ShowState(UI_STATE_AWS_ERROR, 0, 0);
         DelayMs(2000);
     }
 }

@@ -9,6 +9,7 @@
 
 #define CLOUD_HOST "hipazwfbtjr6ch7df6pcnljue40gbszk.lambda-url.us-east-1.on.aws"
 #define CLOUD_PORT 443
+#define CLOUD_PATH_PROCESS "/?mode=process"
 #define CLOUD_PATH_DETECT "/?mode=detect"
 #define CLOUD_PATH_ENROLL "/?mode=enroll"
 #define CLOUD_PATH_AUTH "/?mode=auth"
@@ -197,6 +198,66 @@ static int ParseIntAfter(const char *response, const char *key, int defaultValue
     return atoi(found);
 }
 
+static void ParseStringAfter(const char *response,
+                             const char *key,
+                             char *out,
+                             unsigned long outLen)
+{
+    const char *found;
+    unsigned long i = 0;
+
+    if((response == 0) || (key == 0) || (out == 0) || (outLen == 0)) {
+        return;
+    }
+
+    out[0] = '\0';
+    found = strstr(response, key);
+    if(found == 0) {
+        return;
+    }
+
+    found += strlen(key);
+    while((*found != '\0') && (*found != ':')) {
+        found++;
+    }
+
+    if(*found == ':') {
+        found++;
+    }
+
+    while((*found == ' ') || (*found == '"')) {
+        found++;
+    }
+
+    while((found[i] != '\0') &&
+          (found[i] != '"') &&
+          (found[i] != ',') &&
+          (found[i] != '}') &&
+          (i < (outLen - 1))) {
+        out[i] = found[i];
+        i++;
+    }
+
+    out[i] = '\0';
+}
+
+static CloudCommand_t ParseCommand(const char *response)
+{
+    if(ResponseHas(response, "\"command\"") && ResponseHas(response, "\"enroll\"")) {
+        return CLOUD_COMMAND_ENROLL;
+    }
+
+    if(ResponseHas(response, "\"command\"") && ResponseHas(response, "\"clear\"")) {
+        return CLOUD_COMMAND_CLEAR;
+    }
+
+    if(ResponseHas(response, "\"command\"") && ResponseHas(response, "\"auth\"")) {
+        return CLOUD_COMMAND_AUTHENTICATE;
+    }
+
+    return CLOUD_COMMAND_ERROR;
+}
+
 int Cloud_Init(void)
 {
     long retVal;
@@ -227,6 +288,60 @@ int Cloud_Init(void)
     gCloudSocket = -1;
 
     UART_PRINT("Cloud: ready\n\r");
+    return 0;
+}
+
+int Cloud_ProcessVoice(const short *pcm,
+                       unsigned long samples,
+                       CloudResult_t *result)
+{
+    char response[CLOUD_RX_SIZE];
+    int retVal;
+
+    if(result == 0) {
+        return -1;
+    }
+
+    memset(result, 0, sizeof(CloudResult_t));
+    result->command = CLOUD_COMMAND_ERROR;
+
+    UART_PRINT("Cloud: process voice\n\r");
+
+    retVal = Cloud_PostPcm(CLOUD_PATH_PROCESS,
+                           pcm,
+                           samples,
+                           0,
+                           0,
+                           response,
+                           sizeof(response));
+    if(retVal < 0) {
+        UART_PRINT("Cloud: process POST failed: %d\n\r", retVal);
+        return retVal;
+    }
+
+    if(!ResponseHas(response, "\"ok\"") || !ResponseHas(response, "true")) {
+        UART_PRINT("Cloud: no valid result\n\r");
+        return -1;
+    }
+
+    result->ok = 1;
+    result->command = ParseCommand(response);
+    result->passed = ResponseHas(response, "\"pass\"");
+    result->userId = ParseIntAfter(response, "\"user_id\"", 0);
+    result->score = ParseIntAfter(response, "\"score\"", 0);
+    ParseStringAfter(response, "\"word\"", result->word, sizeof(result->word));
+
+    UART_PRINT("Cloud: word = %s\n\r", result->word);
+    UART_PRINT("Cloud: command = %d pass = %d user = %d score = %d\n\r",
+               result->command,
+               result->passed,
+               result->userId,
+               result->score);
+
+    if(result->command == CLOUD_COMMAND_ERROR) {
+        return -1;
+    }
+
     return 0;
 }
 

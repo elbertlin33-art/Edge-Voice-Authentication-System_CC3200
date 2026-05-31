@@ -6,6 +6,7 @@
 #include "prcm.h"
 #include "hw_memmap.h"
 #include "hw_common_reg.h"
+#include "utils.h"
 
 #include "common.h"
 #include "uart_if.h"
@@ -18,16 +19,15 @@
  * Change this value to test any recording length that fits in RAM.
  * Example: 1 records one second, 2 records two seconds, 5 records five seconds.
  */
-#define TEST_RECORD_SECONDS      1
+#define TEST_RECORD_SECONDS      3
 #define TEST_RECORD_SAMPLES      (MIC_SAMPLE_RATE_HZ * TEST_RECORD_SECONDS)
 #define RECORD_CHUNK_SAMPLES     DSP_FFT_INPUT_SAMPLES
 #define WAVE_PREVIEW_POINTS      128
-#define FFT_NORMALIZE_PEAK       12000
+#define MIC_SETTLE_MS            100
 
 static short gChunk[RECORD_CHUNK_SAMPLES];
+static short gRecording[TEST_RECORD_SAMPLES];
 static short gWavePreview[WAVE_PREVIEW_POINTS];
-static long gFftMag[DSP_FFT_BIN_COUNT];
-static long gFftSum[DSP_FFT_BIN_COUNT];
 
 #if defined(ccs)
 extern void (* const g_pfnVectors[])(void);
@@ -62,6 +62,13 @@ static void PrintRecordingInfo(unsigned long sampleCount)
                sampleCount);
 }
 
+static void DelayMs(unsigned long ms)
+{
+    while(ms--) {
+        MAP_UtilsDelay(80000);
+    }
+}
+
 static void PrintWavePreview(const short *preview,
                              unsigned long previewCount,
                              unsigned long previewStep,
@@ -84,24 +91,74 @@ static void PrintWavePreview(const short *preview,
     UART_PRINT("WAVE_END\n\r");
 }
 
-static void PrintFftBins(const long *mag, unsigned long binCount)
+static void PrintHexByte(unsigned char value, unsigned long *lineCount)
+{
+    UART_PRINT("%02x", (unsigned int)value);
+
+    (*lineCount)++;
+    if((*lineCount % 32) == 0) {
+        UART_PRINT("\n\r");
+    }
+}
+
+static void PrintHexU16(unsigned short value, unsigned long *lineCount)
+{
+    PrintHexByte((unsigned char)(value & 0xFF), lineCount);
+    PrintHexByte((unsigned char)((value >> 8) & 0xFF), lineCount);
+}
+
+static void PrintHexU32(unsigned long value, unsigned long *lineCount)
+{
+    PrintHexByte((unsigned char)(value & 0xFF), lineCount);
+    PrintHexByte((unsigned char)((value >> 8) & 0xFF), lineCount);
+    PrintHexByte((unsigned char)((value >> 16) & 0xFF), lineCount);
+    PrintHexByte((unsigned char)((value >> 24) & 0xFF), lineCount);
+}
+
+static void PrintHexText(const char *text, unsigned long *lineCount)
+{
+    while(*text != '\0') {
+        PrintHexByte((unsigned char)*text, lineCount);
+        text++;
+    }
+}
+
+static void PrintWavFileHex(const short *pcm, unsigned long sampleCount)
 {
     unsigned long i;
+    unsigned long lineCount = 0;
+    unsigned long dataBytes = sampleCount * 2;
+    unsigned long wavBytes = dataBytes + 44;
 
-    if (mag == 0) {
-        return;
+    UART_PRINT("\n\rWAV_HEX_BEGIN filename=mic_test.wav bytes=%lu samples=%lu\n\r",
+               wavBytes,
+               sampleCount);
+
+    PrintHexText("RIFF", &lineCount);
+    PrintHexU32(wavBytes - 8, &lineCount);
+    PrintHexText("WAVE", &lineCount);
+
+    PrintHexText("fmt ", &lineCount);
+    PrintHexU32(16, &lineCount);
+    PrintHexU16(1, &lineCount);
+    PrintHexU16(1, &lineCount);
+    PrintHexU32(MIC_SAMPLE_RATE_HZ, &lineCount);
+    PrintHexU32(MIC_SAMPLE_RATE_HZ * 2, &lineCount);
+    PrintHexU16(2, &lineCount);
+    PrintHexU16(16, &lineCount);
+
+    PrintHexText("data", &lineCount);
+    PrintHexU32(dataBytes, &lineCount);
+
+    for(i = 0; i < sampleCount; i++) {
+        PrintHexU16((unsigned short)pcm[i], &lineCount);
     }
 
-    UART_PRINT("\n\rFFT_BEGIN input_samples=%lu\n\r",
-               (unsigned long)DSP_FFT_INPUT_SAMPLES);
-
-    for (i = 0; i < binCount; i++) {
-        UART_PRINT("FFT[%4lu Hz]=%ld\n\r",
-                   DSP_GetFftBinHz(i),
-                   mag[i]);
+    if((lineCount % 32) != 0) {
+        UART_PRINT("\n\r");
     }
 
-    UART_PRINT("FFT_END\n\r");
+    UART_PRINT("WAV_HEX_END\n\r");
 }
 
 int main(void)
@@ -111,7 +168,7 @@ int main(void)
     unsigned long previewTarget = 0;
     unsigned long previewCount = 0;
     unsigned long previewStep = TEST_RECORD_SAMPLES / WAVE_PREVIEW_POINTS;
-    unsigned long fftBlocks = 0;
+    tAudioStats stats;
     int captured;
 
     BoardInit();
@@ -131,6 +188,7 @@ int main(void)
     }
 
     UART_PRINT("Mic initialized. Recording now...\n\r");
+    DelayMs(MIC_SETTLE_MS);
 
     if (previewStep == 0) {
         previewStep = 1;
@@ -144,7 +202,12 @@ int main(void)
             want = RECORD_CHUNK_SAMPLES;
         }
 
-        captured = Mic_RecordSamples(gChunk, RECORD_CHUNK_SAMPLES, want);
+        UART_PRINT("Requesting chunk: want=%lu total=%lu\n\r", want, totalCaptured);
+        captured = (totalCaptured == 0)
+                 ? Mic_RecordSamples(gChunk, RECORD_CHUNK_SAMPLES, want)
+                 : Mic_RecordMoreSamples(gChunk, RECORD_CHUNK_SAMPLES, want);
+        UART_PRINT("Chunk returned: captured=%d\n\r", captured);
+
         if (captured <= 0) {
             UART_PRINT("Recording stopped early. captured=%lu\n\r", totalCaptured);
             break;
@@ -154,32 +217,15 @@ int main(void)
             short sample = gChunk[i];
             unsigned long sampleIndex = totalCaptured + i;
 
+            if (sampleIndex < TEST_RECORD_SAMPLES) {
+                gRecording[sampleIndex] = sample;
+            }
+
             if ((previewCount < WAVE_PREVIEW_POINTS) &&
                 (sampleIndex >= previewTarget)) {
                 gWavePreview[previewCount] = sample;
                 previewCount++;
                 previewTarget += previewStep;
-            }
-        }
-
-        /*
-         * Each full chunk contributes one frequency analysis block. The final
-         * short chunk is used for waveform/stats, but skipped for FFT.
-         */
-        if ((unsigned long)captured == RECORD_CHUNK_SAMPLES) {
-            unsigned long bin;
-
-            DSP_RemoveDC(gChunk, RECORD_CHUNK_SAMPLES);
-            DSP_NormalizePeak(gChunk, RECORD_CHUNK_SAMPLES, FFT_NORMALIZE_PEAK);
-
-            if (DSP_ComputeFFT(gChunk,
-                               RECORD_CHUNK_SAMPLES,
-                               gFftMag,
-                               DSP_FFT_BIN_COUNT) == 0) {
-                for (bin = 0; bin < DSP_FFT_BIN_COUNT; bin++) {
-                    gFftSum[bin] += gFftMag[bin];
-                }
-                fftBlocks++;
             }
         }
 
@@ -199,20 +245,16 @@ int main(void)
     UART_PRINT("Recording complete. captured=%lu\n\r", totalCaptured);
 
     PrintRecordingInfo(totalCaptured);
+
+    DSP_GetAudioStats(gRecording, totalCaptured, &stats);
+    UART_PRINT("\n\rAUDIO_STATS min=%d max=%d peak_to_peak=%d avg_abs=%ld\n\r",
+               stats.min,
+               stats.max,
+               stats.peakToPeak,
+               stats.avgAbs);
+
     PrintWavePreview(gWavePreview, previewCount, previewStep, totalCaptured);
-
-    if (fftBlocks > 0) {
-        unsigned long bin;
-
-        for (bin = 0; bin < DSP_FFT_BIN_COUNT; bin++) {
-            gFftMag[bin] = gFftSum[bin] / (long)fftBlocks;
-        }
-
-        PrintFftBins(gFftMag, DSP_FFT_BIN_COUNT);
-    } else {
-        UART_PRINT("FFT failed. Need at least %lu samples.\n\r",
-                   (unsigned long)DSP_FFT_INPUT_SAMPLES);
-    }
+    PrintWavFileHex(gRecording, totalCaptured);
 
     UART_PRINT("\n\rTest done. Change TEST_RECORD_SECONDS to try another x-second capture.\n\r");
 

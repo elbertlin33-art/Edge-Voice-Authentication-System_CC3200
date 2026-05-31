@@ -13,11 +13,15 @@ typedef enum {
     UI_STATE_PASS,
     UI_STATE_FAIL,
     UI_STATE_ENROLLED,
-    UI_STATE_CLEARED
+    UI_STATE_CLEARED,
+    UI_STATE_TOO_NOISY,
+    UI_STATE_TOO_QUIET,
+    UI_STATE_AWS_ERROR
 } UIState_t;
 
 void UI_Init(void);
 void UI_ShowState(UIState_t state, int user_id, int score);
+void UI_ShowWord(const char *word);
 
 #endif // UI_H
 

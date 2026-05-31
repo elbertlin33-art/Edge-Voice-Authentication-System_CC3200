@@ -72,8 +72,30 @@ void UI_ShowState(UIState_t state, int user_id, int score)
         case UI_STATE_CLEARED:
             UI_DisplayLines("CLEARED", "All profiles deleted", "Ready");
             break;
+        case UI_STATE_TOO_NOISY:
+            UI_DisplayLines("TOO NOISY", "Try again", "Returning idle");
+            break;
+        case UI_STATE_TOO_QUIET:
+            UI_DisplayLines("TOO QUIET", "No clear voice", "Returning idle");
+            break;
+        case UI_STATE_AWS_ERROR:
+            UI_DisplayLines("AWS ERROR", "No cloud result", "Try again");
+            break;
         default:
             UI_DisplayLines("Unknown state", "", "");
             break;
     }
+}
+
+void UI_ShowWord(const char *word)
+{
+    char line2[32] = {0};
+
+    if((word == 0) || (word[0] == '\0')) {
+        UI_DisplayLines("Word", "none detected", "Processing");
+        return;
+    }
+
+    snprintf(line2, sizeof(line2), "%s", word);
+    UI_DisplayLines("Word detected", line2, "Processing");
 }

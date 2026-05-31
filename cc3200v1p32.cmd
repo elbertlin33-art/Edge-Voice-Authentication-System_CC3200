@@ -60,7 +60,7 @@ MEMORY
 {
     /* Application uses internal RAM for program and data */
     SRAM_CODE (RWX) : origin = 0x20004000, length = 0x13000
-    SRAM_DATA (RWX) : origin = 0x20017000, length = 0x19000
+    SRAM_DATA (RWX) : origin = 0x20017000, length = 0x29000
 }
 
 /* Section allocation in memory */
@@ -74,6 +74,7 @@ SECTIONS
     .const  :   > SRAM_CODE
     .cinit  :   > SRAM_CODE
     .pinit  :   > SRAM_CODE
+    .audio_code : > SRAM_CODE
     .data   :   > SRAM_DATA
     .bss    :   > SRAM_DATA
     .sysmem :   > SRAM_DATA

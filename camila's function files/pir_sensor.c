@@ -1,4 +1,5 @@
 #include "pir_sensor.h"
+#include "hw_types.h"
 #include "hw_memmap.h"
 #include "hw_gpio.h"
 #include "gpio.h"

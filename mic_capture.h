@@ -25,6 +25,7 @@ typedef struct
 
 int Mic_Init(void);
 int Mic_RecordSamples(short *pcmOut, unsigned long maxSamples, unsigned long samples);
+int Mic_RecordMoreSamples(short *pcmOut, unsigned long maxSamples, unsigned long samples);
 int Mic_RecordSeconds(short *pcmOut, unsigned long maxSamples, unsigned long seconds);
 void Mic_GetDmaStats(tMicCaptureStats *stats);
 void Mic_RunMonitor(void);

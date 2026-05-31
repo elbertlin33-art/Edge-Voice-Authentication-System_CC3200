@@ -1,8 +1,8 @@
 #include <stdio.h>
 #include "ui.h"
-#include "Adafruit_SSD1351.h"
-#include "oled_test.h"
-#include "Adafruit_GFX.h"
+#include "../Adafruit_SSD1351.h"
+#include "../oled_test.h"
+#include "../Adafruit_GFX.h"
 
 static void UI_DisplayLines(const char *line1,
                             const char *line2,
@@ -36,7 +36,6 @@ void UI_ShowState(UIState_t state, int user_id, int score)
 {
     char line1[32] = {0};
     char line2[32] = {0};
-    char line3[32] = {0};
 
     switch (state)
     {

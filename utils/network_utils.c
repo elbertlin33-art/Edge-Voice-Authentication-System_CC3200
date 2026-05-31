@@ -22,6 +22,7 @@
 #include "gpio_if.h"
 #include "uart_if.h"
 
+#define VERIFY_SERVER_CERT 0
 
 // globals
 
@@ -499,8 +500,7 @@ int tls_connect() {
     int    iAddrSize;
     unsigned char    ucMethod = SL_SO_SEC_METHOD_TLSV1_2;
     unsigned int uiIP;
-    unsigned int uiCipher = SL_SEC_MASK_TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA;//original is commented
-    //unsigned int uiCipher = SL_SEC_MASK_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256;//original not commented
+    unsigned int uiCipher = SL_SEC_MASK_TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA256;
 // SL_SEC_MASK_SSL_RSA_WITH_RC4_128_SHA
 // SL_SEC_MASK_SSL_RSA_WITH_RC4_128_MD5
 // SL_SEC_MASK_TLS_RSA_WITH_AES_256_CBC_SHA
@@ -553,45 +553,28 @@ int tls_connect() {
 
 
 /////////////////////////////////
-// START: COMMENT THIS OUT IF DISABLING SERVER VERIFICATION
     //
-    //configure the socket with CA certificate - for server verification
+    // Send the host name during TLS. Lambda Function URLs need this.
     //
-    
-    lRetVal = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, \
-                           SL_SO_SECURE_FILES_CA_FILE_NAME, \
-                           SL_SSL_CA_CERT, \
-                           strlen(SL_SSL_CA_CERT));
-
-    if(lRetVal < 0) {
-        return printErrConvenience("Device couldn't set socket options \n\r", lRetVal);
-    }
-    
-// END: COMMENT THIS OUT IF DISABLING SERVER VERIFICATION
-/////////////////////////////////
-
-
-    //configure the socket with Client Certificate - for server verification
-    //
-    lRetVal = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, \
-                SL_SO_SECURE_FILES_CERTIFICATE_FILE_NAME, \
-                                    SL_SSL_CLIENT, \
-                           strlen(SL_SSL_CLIENT));
-
+    lRetVal = sl_SetSockOpt(iSockID,
+                            SL_SOL_SOCKET,
+                            SL_SO_SECURE_DOMAIN_NAME_VERIFICATION,
+                            g_Host,
+                            strlen((const char *)g_Host));
     if(lRetVal < 0) {
         return printErrConvenience("Device couldn't set socket options \n\r", lRetVal);
     }
 
-    //configure the socket with Private Key - for server verification
-    //
-    lRetVal = sl_SetSockOpt(iSockID, SL_SOL_SOCKET, \
-            SL_SO_SECURE_FILES_PRIVATE_KEY_FILE_NAME, \
-            SL_SSL_PRIVATE, \
-                           strlen(SL_SSL_PRIVATE));
-
+#if VERIFY_SERVER_CERT
+    lRetVal = sl_SetSockOpt(iSockID,
+                            SL_SOL_SOCKET,
+                            SL_SO_SECURE_FILES_CA_FILE_NAME,
+                            SL_SSL_CA_CERT,
+                            strlen(SL_SSL_CA_CERT));
     if(lRetVal < 0) {
         return printErrConvenience("Device couldn't set socket options \n\r", lRetVal);
     }
+#endif
 
 
     /* connect to the peer device - Google server */
@@ -611,6 +594,7 @@ int tls_connect() {
         UART_PRINT("Device couldn't connect to server:");
         UART_PRINT("%s", g_Host);
         UART_PRINT("\n\r");
+        UART_PRINT("sl_Connect error: %ld\n\r", lRetVal);
         return printErrConvenience("Device couldn't connect to server \n\r", lRetVal);
     }
 

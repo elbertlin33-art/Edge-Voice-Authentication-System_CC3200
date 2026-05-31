@@ -12,6 +12,8 @@
 //
 //*****************************************************************************
 
+#include <string.h>
+
 // Driverlib includes
 #include "hw_types.h"
 #include "hw_ints.h"
@@ -30,6 +32,7 @@
 // App includes
 #include "pin_mux_config.h"
 #include "mic_capture.h"
+#include "dsp_features.h"
 #include "cloud_client.h"
 #include "camila's function files/pir_sensor.h"
 #include "camila's function files/ui.h"
@@ -39,6 +42,8 @@
 #define SPI_IF_BIT_RATE         1000000
 #define RECORD_SECONDS          3
 #define RECORD_SAMPLES          (MIC_SAMPLE_RATE_HZ * RECORD_SECONDS)
+#define RECORD_CHUNK_SAMPLES    DSP_FFT_INPUT_SAMPLES
+#define RUN_BOOT_UPLOAD_TEST    1
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- Start
@@ -53,6 +58,7 @@ extern uVectorEntry __vector_table;
 #endif
 
 static short gPcmBuffer[RECORD_SAMPLES];
+static short gPcmChunk[RECORD_CHUNK_SAMPLES];
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- End
@@ -65,6 +71,7 @@ static short gPcmBuffer[RECORD_SAMPLES];
 static void BoardInit(void);
 static void OLED_SPIInit(void);
 static void DelayMs(unsigned long ms);
+static void App_ShowState(UIState_t state, int userId, int score);
 static int RecordThreeSecondClip(void);
 static void HandleEnrollEvent(void);
 static void HandleMotionEvent(void);
@@ -137,6 +144,50 @@ static void DelayMs(unsigned long ms)
     }
 }
 
+static const char *StateName(UIState_t state)
+{
+    switch(state) {
+        case UI_STATE_IDLE:
+            return "IDLE";
+        case UI_STATE_GET_READY:
+            return "GET_READY";
+        case UI_STATE_RECORDING:
+            return "RECORDING";
+        case UI_STATE_PROCESSING:
+            return "PROCESSING";
+        case UI_STATE_UPLOADING:
+            return "UPLOADING";
+        case UI_STATE_ENROLLING:
+            return "ENROLLING";
+        case UI_STATE_PASS:
+            return "PASS";
+        case UI_STATE_FAIL:
+            return "FAIL";
+        case UI_STATE_ENROLLED:
+            return "ENROLLED";
+        case UI_STATE_CLEARED:
+            return "CLEARED";
+        default:
+            return "UNKNOWN";
+    }
+}
+
+static void App_ShowState(UIState_t state, int userId, int score)
+{
+    UART_PRINT("STATE: %s", StateName(state));
+
+    if(userId > 0) {
+        UART_PRINT(" user=%d", userId);
+    }
+
+    if(score > 0) {
+        UART_PRINT(" score=%d", score);
+    }
+
+    UART_PRINT("\n\r");
+    UI_ShowState(state, userId, score);
+}
+
 //*****************************************************************************
 //
 //! Record one 3-second voice clip
@@ -148,8 +199,48 @@ static void DelayMs(unsigned long ms)
 //*****************************************************************************
 static int RecordThreeSecondClip(void)
 {
-    UI_ShowState(UI_STATE_RECORDING, 0, 0);
-    return Mic_RecordSeconds(gPcmBuffer, RECORD_SAMPLES, RECORD_SECONDS);
+    unsigned long totalCaptured = 0;
+    tMicCaptureStats stats;
+
+    App_ShowState(UI_STATE_RECORDING, 0, 0);
+    UART_PRINT("Mic: recording %d seconds...\n\r", RECORD_SECONDS);
+
+    while(totalCaptured < RECORD_SAMPLES) {
+        unsigned long want = RECORD_SAMPLES - totalCaptured;
+        int captured;
+
+        if(want > RECORD_CHUNK_SAMPLES) {
+            want = RECORD_CHUNK_SAMPLES;
+        }
+
+        captured = Mic_RecordSamples(gPcmChunk, RECORD_CHUNK_SAMPLES, want);
+        UART_PRINT("captured=%d\n\r", captured);
+        if(captured <= 0) {
+            UART_PRINT("Mic: chunk failed, captured=%d\n\r", captured);
+            break;
+        }
+
+        memcpy(&gPcmBuffer[totalCaptured], gPcmChunk, captured * sizeof(short));
+        totalCaptured += (unsigned long)captured;
+
+        UART_PRINT("Mic: captured %lu / %lu samples\n\r",
+                   totalCaptured,
+                   (unsigned long)RECORD_SAMPLES);
+
+        if((unsigned long)captured < want) {
+            UART_PRINT("Mic: short chunk, wanted=%lu got=%d\n\r", want, captured);
+            break;
+        }
+    }
+
+    Mic_GetDmaStats(&stats);
+    UART_PRINT("Mic: dma rx=%lu tx=%lu dropped=%lu\n\r",
+               stats.rxDmaCount,
+               stats.txDmaCount,
+               stats.droppedSamples);
+    UART_PRINT("Mic: audio bytes ready = %lu\n\r", totalCaptured * sizeof(short));
+
+    return (int)totalCaptured;
 }
 
 //*****************************************************************************
@@ -166,19 +257,23 @@ static void HandleEnrollEvent(void)
     int samplesRecorded;
     int userId = 0;
 
-    UI_ShowState(UI_STATE_ENROLLING, 0, 0);
+    App_ShowState(UI_STATE_ENROLLING, 0, 0);
     DelayMs(1000);
 
     samplesRecorded = RecordThreeSecondClip();
 
-    UI_ShowState(UI_STATE_UPLOADING, 0, 0);
+    App_ShowState(UI_STATE_UPLOADING, 0, 0);
     DelayMs(1000);
 
     if((samplesRecorded == RECORD_SAMPLES) &&
-       (Cloud_EnrollVoice(gPcmBuffer, RECORD_SAMPLES, &userId) == 0)) {
-        UI_ShowState(UI_STATE_ENROLLED, userId, 0);
+       (Cloud_EnrollVoice(gPcmBuffer,
+                          RECORD_SAMPLES,
+                          0,
+                          0,
+                          &userId) == 0)) {
+        App_ShowState(UI_STATE_ENROLLED, userId, 0);
     } else {
-        UI_ShowState(UI_STATE_FAIL, 0, 0);
+        App_ShowState(UI_STATE_FAIL, 0, 0);
     }
 
     DelayMs(2000);
@@ -200,38 +295,43 @@ static void HandleMotionEvent(void)
     int score = 0;
     CloudCommand_t command;
 
-    UI_ShowState(UI_STATE_GET_READY, 0, 0);
+    App_ShowState(UI_STATE_GET_READY, 0, 0);
     DelayMs(1000);
 
     samplesRecorded = RecordThreeSecondClip();
 
-    UI_ShowState(UI_STATE_UPLOADING, 0, 0);
+    App_ShowState(UI_STATE_UPLOADING, 0, 0);
     DelayMs(1000);
 
     if(samplesRecorded != RECORD_SAMPLES) {
-        UI_ShowState(UI_STATE_FAIL, 0, 0);
+        App_ShowState(UI_STATE_FAIL, 0, 0);
         DelayMs(2000);
         return;
     }
 
-    command = Cloud_DetectCommand(gPcmBuffer, RECORD_SAMPLES);
+    command = Cloud_DetectCommand(gPcmBuffer,
+                                  RECORD_SAMPLES,
+                                  0,
+                                  0);
 
     if(command == CLOUD_COMMAND_ENROLL) {
         HandleEnrollEvent();
     } else if(command == CLOUD_COMMAND_CLEAR) {
         Cloud_ClearProfiles();
-        UI_ShowState(UI_STATE_CLEARED, 0, 0);
+        App_ShowState(UI_STATE_CLEARED, 0, 0);
         DelayMs(2000);
     } else {
-        UI_ShowState(UI_STATE_PROCESSING, 0, 0);
+        App_ShowState(UI_STATE_PROCESSING, 0, 0);
         DelayMs(1000);
         if(Cloud_AuthenticateVoice(gPcmBuffer,
                                    RECORD_SAMPLES,
+                                   0,
+                                   0,
                                    &userId,
                                    &score) == 0) {
-            UI_ShowState(UI_STATE_PASS, userId, score);
+            App_ShowState(UI_STATE_PASS, userId, score);
         } else {
-            UI_ShowState(UI_STATE_FAIL, 0, 0);
+            App_ShowState(UI_STATE_FAIL, 0, 0);
         }
         DelayMs(2000);
     }
@@ -254,26 +354,40 @@ void main()
     PinMuxConfig();
     InitTerm();
     ClearTerm();
+
     OLED_SPIInit();
     UI_Init();
-    PIR_Init();
-    lRetVal = Mic_Init();
-    if(lRetVal < 0) {
-        UART_PRINT("Unable to initialize microphone\n\r");
-        LOOP_FOREVER();
-    }
+    App_ShowState(UI_STATE_PROCESSING, 0, 0);
+
     lRetVal = Cloud_Init();
     if(lRetVal < 0) {
+        App_ShowState(UI_STATE_FAIL, 0, 0);
         UART_PRINT("Unable to initialize cloud client\n\r");
         LOOP_FOREVER();
     }
 
-    UI_ShowState(UI_STATE_IDLE, 0, 0);
+    PIR_Init();
+
+    lRetVal = Mic_Init();
+    if(lRetVal < 0) {
+        App_ShowState(UI_STATE_FAIL, 0, 0);
+        UART_PRINT("Unable to initialize microphone\n\r");
+        LOOP_FOREVER();
+    }
+
+    App_ShowState(UI_STATE_IDLE, 0, 0);
+
+#if RUN_BOOT_UPLOAD_TEST
+    UART_PRINT("TEST: running one recording/upload without PIR\n\r");
+    HandleMotionEvent();
+    App_ShowState(UI_STATE_IDLE, 0, 0);
+#endif
 
     while(1) {
         if(PIR_MotionDetected()) {
+            UART_PRINT("PIR: motion detected\n\r");
             HandleMotionEvent();
-            UI_ShowState(UI_STATE_IDLE, 0, 0);
+            App_ShowState(UI_STATE_IDLE, 0, 0);
         } else {
             DelayMs(100);
         }

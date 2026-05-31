@@ -279,7 +279,10 @@ int Mic_Init(void)
     return 0;
 }
 
-int Mic_RecordSamples(short *pcmOut, unsigned long maxSamples, unsigned long samples)
+static int Mic_RecordSamplesInternal(short *pcmOut,
+                                     unsigned long maxSamples,
+                                     unsigned long samples,
+                                     int clearOldSamples)
 {
     unsigned long captured = 0;
     unsigned long timeout = 0;
@@ -289,8 +292,9 @@ int Mic_RecordSamples(short *pcmOut, unsigned long maxSamples, unsigned long sam
         return -1;
     }
 
-    /* Start this recording from fresh audio. */
-    Mic_ClearOldSamples();
+    if(clearOldSamples) {
+        Mic_ClearOldSamples();
+    }
 
     /* Keep reading until the requested number of mono samples is captured. */
     while (captured < samples) {
@@ -329,6 +333,16 @@ int Mic_RecordSamples(short *pcmOut, unsigned long maxSamples, unsigned long sam
     }
 
     return (int)captured;
+}
+
+int Mic_RecordSamples(short *pcmOut, unsigned long maxSamples, unsigned long samples)
+{
+    return Mic_RecordSamplesInternal(pcmOut, maxSamples, samples, 1);
+}
+
+int Mic_RecordMoreSamples(short *pcmOut, unsigned long maxSamples, unsigned long samples)
+{
+    return Mic_RecordSamplesInternal(pcmOut, maxSamples, samples, 0);
 }
 
 int Mic_RecordSeconds(short *pcmOut, unsigned long maxSamples, unsigned long seconds)

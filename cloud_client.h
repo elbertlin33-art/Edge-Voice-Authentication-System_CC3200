@@ -13,11 +13,20 @@ typedef enum {
 } CloudCommand_t;
 
 int Cloud_Init(void);
-CloudCommand_t Cloud_DetectCommand(const short *pcm, unsigned long samples);
-int Cloud_EnrollVoice(const short *pcm, unsigned long samples, int *userId);
+CloudCommand_t Cloud_DetectCommand(const short *pcmA,
+                                   unsigned long samplesA,
+                                   const short *pcmB,
+                                   unsigned long samplesB);
+int Cloud_EnrollVoice(const short *pcmA,
+                      unsigned long samplesA,
+                      const short *pcmB,
+                      unsigned long samplesB,
+                      int *userId);
 int Cloud_ClearProfiles(void);
-int Cloud_AuthenticateVoice(const short *pcm,
-                            unsigned long samples,
+int Cloud_AuthenticateVoice(const short *pcmA,
+                            unsigned long samplesA,
+                            const short *pcmB,
+                            unsigned long samplesB,
                             int *userId,
                             int *score);
 

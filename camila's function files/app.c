@@ -1,8 +1,9 @@
 #include "app.h"
-#include "pin_mux_config.h"
+#include "../pin_mux_config.h"
 #include "ui.h"
 #include "pir_sensor.h"
 #include "rom_map.h"
+#include "utils.h"
 
 static void App_DelayMs(unsigned long ms)
 {

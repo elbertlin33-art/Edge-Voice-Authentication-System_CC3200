@@ -5,9 +5,8 @@
 #include "Adafruit_GFX.h"
 
 #define UI_SCREEN_WIDTH 128
+#define UI_CENTER_X     64
 #define UI_CHAR_WIDTH   6
-#define UI_LINE_HEIGHT  16
-#define UI_BLOCK_TOP    40
 
 static int UI_TextX(const char *text)
 {
@@ -30,147 +29,227 @@ static int UI_TextX(const char *text)
     return (UI_SCREEN_WIDTH - width) / 2;
 }
 
-static void UI_DisplayLines(const char *line1,
-                            const char *line2,
-                            const char *line3)
+static void UI_DrawText(const char *text, int y, unsigned int color)
+{
+    if(text == 0) {
+        return;
+    }
+
+    setTextSize(1);
+    setTextColor(color, BLACK);
+    setCursor(UI_TextX(text), y);
+    Outstr((char *)text);
+}
+
+static void UI_DrawTitle(const char *title)
+{
+    UI_DrawText(title, 4, WHITE);
+    drawFastHLine(12, 18, 104, 0x39E7);
+}
+
+static void UI_DrawThickLine(int x0, int y0, int x1, int y1,
+                             unsigned char width,
+                             unsigned int color)
+{
+    signed char offset;
+    signed char half = (signed char)(width / 2);
+
+    for(offset = -half; offset <= half; offset++) {
+        drawLine(x0 + offset, y0, x1 + offset, y1, color);
+        drawLine(x0, y0 + offset, x1, y1 + offset, color);
+    }
+}
+
+static void UI_DrawHourglass(const char *title)
 {
     fillScreen(BLACK);
-    setTextColor(WHITE, BLACK);
-    setTextSize(1);
+    UI_DrawTitle(title);
 
-    setCursor(UI_TextX(line1), UI_BLOCK_TOP);
-    Outstr((char *)line1);
+    drawRect(36, 30, 56, 78, WHITE);
+    drawRect(37, 31, 54, 76, WHITE);
+    fillRect(42, 36, 44, 10, CYAN);
+    fillTriangle(44, 48, 84, 48, 64, 68, YELLOW);
+    fillTriangle(44, 100, 84, 100, 64, 76, YELLOW);
+    fillRect(42, 92, 44, 10, CYAN);
+}
 
-    setCursor(UI_TextX(line2), UI_BLOCK_TOP + UI_LINE_HEIGHT);
-    Outstr((char *)line2);
+static void UI_DrawWarning(const char *title)
+{
+    fillScreen(BLACK);
+    UI_DrawTitle(title);
 
-    setCursor(UI_TextX(line3), UI_BLOCK_TOP + (2 * UI_LINE_HEIGHT));
-    Outstr((char *)line3);
+    fillTriangle(64, 26, 15, 112, 113, 112, RED);
+    fillTriangle(64, 39, 29, 103, 99, 103, YELLOW);
+    fillRoundRect(59, 55, 10, 30, 4, BLACK);
+    fillCircle(64, 94, 6, BLACK);
+}
+
+static void UI_DrawMicrophone(const char *title)
+{
+    fillScreen(BLACK);
+    UI_DrawTitle(title);
+
+    drawCircle(UI_CENTER_X, 76, 36, WHITE);
+    drawCircle(UI_CENTER_X, 76, 37, WHITE);
+    fillRoundRect(54, 48, 20, 36, 10, RED);
+    drawCircle(64, 72, 22, RED);
+    fillRect(36, 42, 24, 34, BLACK);
+    fillRect(68, 42, 24, 34, BLACK);
+    fillRect(60, 92, 8, 12, RED);
+    fillRoundRect(48, 103, 32, 7, 3, RED);
+}
+
+static void UI_DrawClosedLock(const char *title)
+{
+    fillScreen(BLACK);
+    UI_DrawTitle(title);
+
+    drawCircle(64, 58, 26, WHITE);
+    drawCircle(64, 58, 25, WHITE);
+    drawCircle(64, 58, 24, WHITE);
+    fillRect(35, 58, 58, 24, BLACK);
+    fillRoundRect(30, 66, 68, 46, 7, WHITE);
+    fillCircle(64, 88, 5, BLACK);
+    fillRect(61, 91, 6, 12, BLACK);
+}
+
+static void UI_DrawOpenLock(const char *title)
+{
+    fillScreen(BLACK);
+    UI_DrawTitle(title);
+
+    fillRoundRect(28, 72, 68, 42, 7, GREEN);
+    fillCircle(64, 92, 5, BLACK);
+    fillRect(61, 95, 6, 10, BLACK);
+
+    UI_DrawThickLine(76, 72, 76, 46, 8, WHITE);
+    drawCircle(98, 48, 22, WHITE);
+    drawCircle(98, 48, 21, WHITE);
+    fillRect(76, 46, 32, 35, BLACK);
+    UI_DrawThickLine(119, 48, 119, 67, 8, BLACK);
+}
+
+static void UI_DrawWifi(const char *title)
+{
+    fillScreen(BLACK);
+    UI_DrawTitle(title);
+
+    drawCircle(UI_CENTER_X, 118, 72, WHITE);
+    drawCircle(UI_CENTER_X, 118, 71, WHITE);
+    drawCircle(UI_CENTER_X, 118, 50, WHITE);
+    drawCircle(UI_CENTER_X, 118, 49, WHITE);
+    drawCircle(UI_CENTER_X, 118, 28, WHITE);
+    drawCircle(UI_CENTER_X, 118, 27, WHITE);
+
+    fillRect(0, 86, 128, 42, BLACK);
+    fillRect(0, 20, 11, 108, BLACK);
+    fillRect(117, 20, 11, 108, BLACK);
+    fillCircle(UI_CENTER_X, 102, 10, WHITE);
 }
 
 void UI_Init(void)
 {
     Adafruit_Init();
     fillScreen(BLACK);
-    setTextColor(WHITE, BLACK);
-    setTextSize(1);
-    setCursor(UI_TextX("Voice Auth ready"), UI_BLOCK_TOP + UI_LINE_HEIGHT);
-    Outstr("Voice Auth ready");
+    UI_DrawTitle("VOICE AUTH READY");
 }
 
 void UI_ShowState(UIState_t state, int user_id, int score)
 {
-    char line1[32] = {0};
+    char title[24] = {0};
+
+    (void)user_id;
 
     switch (state)
     {
         case UI_STATE_IDLE:
-            UI_DisplayLines("IDLE", "Waiting for motion", "Ready");
+            fillScreen(BLACK);
             break;
         case UI_STATE_GET_READY:
-            UI_DisplayLines("Get Ready...", "Speak in 1 second", "Preparing");
+            UI_DrawHourglass("GET READY");
             break;
         case UI_STATE_RECORDING:
-            UI_DisplayLines("Speak now", "Recording 3 sec", "Hold still");
+            UI_DrawMicrophone("RECORDING");
             break;
         case UI_STATE_PROCESSING:
-            UI_DisplayLines("Processing", "Extracting features", "Please wait");
+            UI_DrawHourglass("PROCESSING");
             break;
         case UI_STATE_UPLOADING:
-            UI_DisplayLines("Uploading", "Sending audio to cloud", "Please wait");
+            UI_DrawWifi("UPLOADING");
             break;
         case UI_STATE_ENROLLING:
-            UI_DisplayLines("Enroll Mode", "Get ready", "Say your phrase");
+            UI_DrawOpenLock("ENROLLING");
             break;
         case UI_STATE_PASS:
-            snprintf(line1, sizeof(line1), "PASS (%d%%)", score);
-            UI_DisplayLines(line1, "Authenticated", "Welcome");
+            snprintf(title, sizeof(title), "PASS %d%%", score);
+            UI_DrawOpenLock(title);
             break;
         case UI_STATE_FAIL:
-            if(score > 0) {
-                snprintf(line1, sizeof(line1), "FAIL (%d%%)", score);
-                UI_DisplayLines(line1, "No matching profile", "Try again");
-            } else {
-                UI_DisplayLines("FAIL", "No matching profile", "Try again");
-            }
+            snprintf(title, sizeof(title), (score > 0) ? "FAIL %d%%" : "FAIL", score);
+            UI_DrawClosedLock(title);
             break;
         case UI_STATE_ENROLLED:
-            snprintf(line1, sizeof(line1), "ENROLLED: User %d", user_id);
-            UI_DisplayLines(line1, "Profile saved", "Ready");
+            UI_DrawOpenLock("ENROLLED");
             break;
         case UI_STATE_CLEARED:
-            UI_DisplayLines("CLEARED", "All profiles deleted", "Ready");
+            UI_DrawClosedLock("CLEARED");
             break;
         case UI_STATE_TOO_NOISY:
-            UI_DisplayLines("TOO NOISY", "Try again", "Returning idle");
+            UI_DrawWarning("TOO NOISY");
             break;
         case UI_STATE_TOO_QUIET:
-            UI_DisplayLines("TOO QUIET", "No clear voice", "Returning idle");
+            UI_DrawWarning("TOO QUIET");
             break;
         case UI_STATE_AWS_ERROR:
-            UI_DisplayLines("AWS ERROR", "No cloud result", "Try again");
+            UI_DrawWarning("AWS ERROR");
             break;
         default:
-            UI_DisplayLines("Unknown state", "", "");
+            UI_DrawWarning("ERROR");
             break;
     }
 }
 
 void UI_ShowInitializing(void)
 {
-    UI_DisplayLines("Initializing...", "Starting device", "Please wait");
+    UI_DrawHourglass("INITIALIZING");
 }
 
 void UI_ShowConnectingWifi(void)
 {
-    UI_DisplayLines("Connecting Wi-Fi", "Waiting for IP", "Please wait");
+    UI_DrawWifi("CONNECTING");
 }
 
 void UI_ShowWait(void)
 {
-    UI_DisplayLines("Please wait", "Checking cloud", "Almost ready");
+    UI_DrawHourglass("PLEASE WAIT");
 }
 
 void UI_ShowWord(const char *word)
 {
-    char line2[32] = {0};
-
-    if((word == 0) || (word[0] == '\0')) {
-        UI_DisplayLines("Word", "none detected", "Processing");
-        return;
-    }
-
-    snprintf(line2, sizeof(line2), "%s", word);
-    UI_DisplayLines("Word detected", line2, "Processing");
+    (void)word;
+    UI_DrawOpenLock("WORD HEARD");
 }
 
 void UI_ShowWords(const char *words)
 {
-    char line2[32] = {0};
-
-    if((words == 0) || (words[0] == '\0')) {
-        UI_DisplayLines("Words detected", "none", "Processing");
-        return;
-    }
-
-    snprintf(line2, sizeof(line2), "%s", words);
-    UI_DisplayLines("Words detected", line2, "Processing");
+    (void)words;
+    UI_DrawOpenLock("WORDS HEARD");
 }
 
 void UI_ShowWelcome(const char *name)
 {
-    char line2[32] = {0};
+    char title[24] = {0};
 
     if((name == 0) || (name[0] == '\0')) {
-        UI_DisplayLines("Welcome", "user!", "Ready");
+        UI_DrawOpenLock("WELCOME");
         return;
     }
 
-    snprintf(line2, sizeof(line2), "%s!", name);
-    UI_DisplayLines("Welcome", line2, "Ready");
+    snprintf(title, sizeof(title), "WELCOME %s", name);
+    UI_DrawOpenLock(title);
 }
 
 void UI_ShowNoUser(void)
 {
-    UI_DisplayLines("No existing profile", "Say apple", "to enroll");
+    UI_DrawClosedLock("NO PROFILE");
 }

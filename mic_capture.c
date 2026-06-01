@@ -7,6 +7,7 @@
 #include "prcm.h"
 #include "i2s.h"
 #include "udma.h"
+#include "utils.h"
 
 #include "common.h"
 #include "uart_if.h"
@@ -37,9 +38,9 @@
 #define MIC_BYTES_PER_WORD        4
 #define MIC_I2S_CLK_HZ            (MIC_SAMPLE_RATE_HZ * MIC_CHANNELS * MIC_BITS_PER_SLOT)
 
-/* Each stereo frame has two 32-bit words: one empty/dummy word and one mic word. */
+/* Each stereo frame has two 32-bit words. L/R=GND on INMP441 selects left slot. */
 #define MIC_FRAME_BYTES           (MIC_CHANNELS * MIC_BYTES_PER_WORD)
-#define MIC_ACTIVE_WORD_INDEX     1
+#define MIC_ACTIVE_WORD_INDEX     0
 
 /* DMA copies blocks of 256 32-bit words at a time. */
 #define MIC_DMA_BUF_BYTES         (16 * 1024)
@@ -47,7 +48,17 @@
 #define MIC_DMA_XFER_BYTES        (MIC_DMA_XFER_ITEMS * MIC_BYTES_PER_WORD)
 
 /* Timeout prevents an infinite loop if I2S/DMA stops. */
-#define MIC_RECORD_TIMEOUT_TICKS  0x00FFFFFF
+#define MIC_RECORD_TIMEOUT_TICKS  0x00080000
+
+#ifndef MIC_ENABLE_RECORD_TEST
+#define MIC_ENABLE_RECORD_TEST    0
+#endif
+
+#if MIC_ENABLE_RECORD_TEST
+#define MIC_RECORD_TEST_SECONDS   3
+#define MIC_RECORD_TEST_SAMPLES   (MIC_SAMPLE_RATE_HZ * MIC_RECORD_TEST_SECONDS)
+#define MIC_RECORD_TEST_CHUNK     MIC_SAMPLE_RATE_HZ
+#endif
 
 /* CC3200 SDK has no official 32-bit slot macro, so define the register value. */
 #ifndef I2S_SLOT_SIZE_32
@@ -65,6 +76,32 @@ static unsigned long gRxDmaCount = 0;
 static unsigned long gTxDmaCount = 0;
 static unsigned long gDroppedSamples = 0;
 static int gMicReady = 0;
+
+static unsigned char *Mic_AdvanceRecordPtr(unsigned char *ptr,
+                                           unsigned long bytes)
+{
+    unsigned long offset;
+
+    if(gRecordBuffer == 0) {
+        return ptr;
+    }
+
+    ptr += bytes;
+    if(ptr < gRecordBuffer->pucBufferEndPtr) {
+        return ptr;
+    }
+
+    offset = (unsigned long)(ptr - gRecordBuffer->pucBufferEndPtr);
+    return gRecordBuffer->pucBufferStartPtr + offset;
+}
+
+static void Mic_ResetRecordBuffer(void)
+{
+    if(gRecordBuffer != 0) {
+        gRecordBuffer->pucReadPtr = gRecordBuffer->pucBufferStartPtr;
+        gRecordBuffer->pucWritePtr = gRecordBuffer->pucBufferStartPtr;
+    }
+}
 
 static void Mic_ConfigI2S(void)
 {
@@ -92,6 +129,10 @@ static void Mic_ConfigI2S(void)
 
 static void Mic_SetupRxDma(void)
 {
+    unsigned char *primaryPtr = GetWritePtr(gRecordBuffer);
+    unsigned char *alternatePtr = Mic_AdvanceRecordPtr(primaryPtr,
+                                                       MIC_DMA_XFER_BYTES);
+
     /* Primary RX DMA: I2S RX register -> circular buffer write pointer. */
     UDMASetupTransfer(UDMA_CH4_I2S_RX,
                       UDMA_MODE_PINGPONG,
@@ -100,7 +141,7 @@ static void Mic_SetupRxDma(void)
                       UDMA_ARB_8,
                       (void *)I2S_RX_DMA_PORT,
                       UDMA_CHCTL_SRCINC_NONE,
-                      (void *)GetWritePtr(gRecordBuffer),
+                      (void *)primaryPtr,
                       UDMA_CHCTL_DSTINC_32);
 
     /* Alternate RX DMA: starts at the next block in the same buffer. */
@@ -111,7 +152,7 @@ static void Mic_SetupRxDma(void)
                       UDMA_ARB_8,
                       (void *)I2S_RX_DMA_PORT,
                       UDMA_CHCTL_SRCINC_NONE,
-                      (void *)(GetWritePtr(gRecordBuffer) + MIC_DMA_XFER_BYTES),
+                      (void *)alternatePtr,
                       UDMA_CHCTL_DSTINC_32);
 
     /* Allow normal DMA requests. This was required during bring-up. */
@@ -214,13 +255,109 @@ static void Mic_PollDma(void)
     Mic_RearmTxIfDone(0x25, UDMA_CH5_I2S_TX | UDMA_ALT_SELECT);
 }
 
-static void Mic_ClearOldSamples(void)
+#if MIC_ENABLE_RECORD_TEST
+static void Mic_DelayMs(unsigned long ms)
 {
-    /* Drop old samples by moving read pointer to current write pointer. */
-    if (gRecordBuffer != 0) {
-        gRecordBuffer->pucReadPtr = gRecordBuffer->pucWritePtr;
+    while(ms--) {
+        MAP_UtilsDelay(80000);
     }
 }
+
+static void Mic_PrintHexByte(unsigned char value, unsigned long *lineCount)
+{
+    UART_PRINT("%02x", (unsigned int)value);
+
+    (*lineCount)++;
+    if((*lineCount % 32) == 0) {
+        UART_PRINT("\n\r");
+    }
+}
+
+static void Mic_PrintHexU16(unsigned short value, unsigned long *lineCount)
+{
+    Mic_PrintHexByte((unsigned char)(value & 0xFF), lineCount);
+    Mic_PrintHexByte((unsigned char)((value >> 8) & 0xFF), lineCount);
+}
+
+static void Mic_PrintHexU32(unsigned long value, unsigned long *lineCount)
+{
+    Mic_PrintHexByte((unsigned char)(value & 0xFF), lineCount);
+    Mic_PrintHexByte((unsigned char)((value >> 8) & 0xFF), lineCount);
+    Mic_PrintHexByte((unsigned char)((value >> 16) & 0xFF), lineCount);
+    Mic_PrintHexByte((unsigned char)((value >> 24) & 0xFF), lineCount);
+}
+
+static void Mic_PrintHexText(const char *text, unsigned long *lineCount)
+{
+    while(*text != '\0') {
+        Mic_PrintHexByte((unsigned char)*text, lineCount);
+        text++;
+    }
+}
+
+static void Mic_PrintZeroStats(const short *pcm, unsigned long sampleCount)
+{
+    unsigned long i;
+    unsigned long zeroCount = 0;
+    long maxAbs = 0;
+
+    for(i = 0; i < sampleCount; i++) {
+        long sample = pcm[i];
+        long absSample = (sample < 0) ? -sample : sample;
+
+        if(sample == 0) {
+            zeroCount++;
+        }
+
+        if(absSample > maxAbs) {
+            maxAbs = absSample;
+        }
+    }
+
+    UART_PRINT("zero_samples=%lu nonzero_samples=%lu max_abs=%ld\n\r",
+               zeroCount,
+               sampleCount - zeroCount,
+               maxAbs);
+}
+
+static void Mic_PrintWavFileHex(const short *pcm, unsigned long sampleCount)
+{
+    unsigned long i;
+    unsigned long lineCount = 0;
+    unsigned long dataBytes = sampleCount * 2;
+    unsigned long wavBytes = dataBytes + 44;
+
+    UART_PRINT("\n\rWAV_HEX_BEGIN filename=mic_capture_test.wav bytes=%lu samples=%lu\n\r",
+               wavBytes,
+               sampleCount);
+
+    Mic_PrintHexText("RIFF", &lineCount);
+    Mic_PrintHexU32(wavBytes - 8, &lineCount);
+    Mic_PrintHexText("WAVE", &lineCount);
+
+    Mic_PrintHexText("fmt ", &lineCount);
+    Mic_PrintHexU32(16, &lineCount);
+    Mic_PrintHexU16(1, &lineCount);
+    Mic_PrintHexU16(1, &lineCount);
+    Mic_PrintHexU32(MIC_SAMPLE_RATE_HZ, &lineCount);
+    Mic_PrintHexU32(MIC_SAMPLE_RATE_HZ * 2, &lineCount);
+    Mic_PrintHexU16(2, &lineCount);
+    Mic_PrintHexU16(16, &lineCount);
+
+    Mic_PrintHexText("data", &lineCount);
+    Mic_PrintHexU32(dataBytes, &lineCount);
+
+    for(i = 0; i < sampleCount; i++) {
+        Mic_PrintHexU16((unsigned short)pcm[i], &lineCount);
+    }
+
+    if((lineCount % 32) != 0) {
+        UART_PRINT("\n\r");
+    }
+
+    UART_PRINT("WAV_HEX_END\n\r");
+}
+#endif
 
 int Mic_Init(void)
 {
@@ -293,17 +430,19 @@ static int Mic_RecordSamplesInternal(short *pcmOut,
     }
 
     if(clearOldSamples) {
-        Mic_ClearOldSamples();
+        UART_PRINT("Mic: restarting DMA pipeline\n\r");
+
+        /* Force both DMA channels idle so re-setup doesn't corrupt in-flight transfers. */
+        MAP_uDMAChannelDisable(UDMA_CH4_I2S_RX);
+        MAP_uDMAChannelDisable(UDMA_CH5_I2S_TX);
+
+        Mic_ResetRecordBuffer();
 
         /* Clear any I2S error flags (ROVRN, XUNDRN) that fired during idle.
          * Without this, the I2S hardware stops issuing DMA requests. */
         MAP_I2SIntClear(I2S_BASE, I2S_INT_RDMA | I2S_INT_XDMA |
                                   I2S_INT_ROVRN | I2S_INT_RSYNCERR |
                                   I2S_INT_XUNDRN | I2S_INT_XSYNCERR);
-
-        /* Force both DMA channels idle so re-setup doesn't corrupt in-flight transfers. */
-        MAP_uDMAChannelDisable(UDMA_CH4_I2S_RX);
-        MAP_uDMAChannelDisable(UDMA_CH5_I2S_TX);
 
         /* Re-arm DMA descriptors from the current buffer write position. */
         Mic_SetupRxDma();
@@ -329,7 +468,7 @@ static int Mic_RecordSamplesInternal(short *pcmOut,
             /* Copy one stereo frame out of the circular DMA buffer. */
             ReadBuffer(gRecordBuffer, (unsigned char *)frame, MIC_FRAME_BYTES);
 
-            /* The INMP441 sample is in the second 32-bit word for our wiring/config. */
+            /* The INMP441 sample is in the selected I2S word for our L/R wiring. */
             rawMicWord = frame[MIC_ACTIVE_WORD_INDEX];
 
             /* Convert from 32-bit I2S slot to signed 16-bit PCM. */
@@ -346,6 +485,9 @@ static int Mic_RecordSamplesInternal(short *pcmOut,
 
             /* Return partial count if DMA/I2S stops. */
             if (timeout > MIC_RECORD_TIMEOUT_TICKS) {
+                UART_PRINT("Mic: timeout waiting for samples, captured=%lu / %lu\n\r",
+                           captured,
+                           samples);
                 gDroppedSamples += (samples - captured);
                 return (int)captured;
             }
@@ -437,3 +579,102 @@ void Mic_RunMonitor(void)
                    dma.droppedSamples);
     }
 }
+
+#if MIC_ENABLE_RECORD_TEST
+void Mic_RunRecordTest(void)
+{
+    static short pcm[MIC_RECORD_TEST_SAMPLES];
+    unsigned long i;
+    tAudioStats audio;
+    tMicCaptureStats dma;
+    int n;
+
+    if (Mic_Init() < 0) {
+        UART_PRINT("MIC: init failed\n\r");
+        return;
+    }
+
+    UART_PRINT("\n\r=== INMP441 Record Test From mic_capture.c ===\n\r");
+    UART_PRINT("First, quick live check. Tap or talk into the mic.\n\r");
+
+    for(i = 0; i < 8; i++) {
+        n = Mic_RecordSamples(pcm, DSP_FFT_INPUT_SAMPLES, DSP_FFT_INPUT_SAMPLES);
+        if(n <= 0) {
+            UART_PRINT("[%lu] live check failed\n\r", i);
+            continue;
+        }
+
+        DSP_GetAudioStats(pcm, (unsigned long)n, &audio);
+        Mic_GetDmaStats(&dma);
+        UART_PRINT("[%lu] live min=%6d max=%6d p-p=%6d |avg|=%5ld rx=%lu tx=%lu drop=%lu\n\r",
+                   i,
+                   audio.min,
+                   audio.max,
+                   audio.peakToPeak,
+                   audio.avgAbs,
+                   dma.rxDmaCount,
+                   dma.txDmaCount,
+                   dma.droppedSamples);
+    }
+
+    UART_PRINT("\n\rRecording %lu seconds in 3...\n\r",
+               (unsigned long)MIC_RECORD_TEST_SECONDS);
+    Mic_DelayMs(1000);
+    UART_PRINT("Recording %lu seconds in 2...\n\r",
+               (unsigned long)MIC_RECORD_TEST_SECONDS);
+    Mic_DelayMs(1000);
+    UART_PRINT("Recording %lu seconds in 1...\n\r",
+               (unsigned long)MIC_RECORD_TEST_SECONDS);
+    Mic_DelayMs(1000);
+    UART_PRINT("START TALKING NOW for %lu seconds\n\r",
+               (unsigned long)MIC_RECORD_TEST_SECONDS);
+
+    n = 0;
+    for(i = 0; i < MIC_RECORD_TEST_SECONDS; i++) {
+        int chunk;
+
+        UART_PRINT("record chunk %lu / %lu...\n\r",
+                   i + 1,
+                   (unsigned long)MIC_RECORD_TEST_SECONDS);
+
+        chunk = Mic_RecordSamples(&pcm[n],
+                                  MIC_RECORD_TEST_SAMPLES - (unsigned long)n,
+                                  MIC_RECORD_TEST_CHUNK);
+        UART_PRINT("chunk captured=%d\n\r", chunk);
+
+        if(chunk <= 0) {
+            break;
+        }
+
+        n += chunk;
+    }
+
+    if(n <= 0) {
+        UART_PRINT("record failed, captured=%d\n\r", n);
+        return;
+    }
+
+    UART_PRINT("record complete, captured=%d\n\r", n);
+    UART_PRINT("RECORDING_INFO sample_rate=%lu seconds=%lu total_samples=%d\n\r",
+               (unsigned long)MIC_SAMPLE_RATE_HZ,
+               (unsigned long)MIC_RECORD_TEST_SECONDS,
+               n);
+
+    DSP_GetAudioStats(pcm, (unsigned long)n, &audio);
+    Mic_GetDmaStats(&dma);
+    UART_PRINT("AUDIO_STATS min=%d max=%d peak_to_peak=%d avg_abs=%ld\n\r",
+               audio.min,
+               audio.max,
+               audio.peakToPeak,
+               audio.avgAbs);
+    UART_PRINT("DMA_STATS rx=%lu tx=%lu dropped=%lu\n\r",
+               dma.rxDmaCount,
+               dma.txDmaCount,
+               dma.droppedSamples);
+
+    Mic_PrintZeroStats(pcm, (unsigned long)n);
+    Mic_PrintWavFileHex(pcm, (unsigned long)n);
+
+    UART_PRINT("\n\rMic record test done.\n\r");
+}
+#endif

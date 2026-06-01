@@ -20,12 +20,24 @@ typedef struct {
     int userId;
     int score;
     char word[32];
+    char words[96];
+    char transcript[96];
+    char reason[32];
+    char userName[32];
+    char password[96];
 } CloudResult_t;
 
 int Cloud_Init(void);
+int Cloud_CheckUsers(void);
 int Cloud_ProcessVoice(const short *pcm,
                        unsigned long samples,
                        CloudResult_t *result);
+int Cloud_EnrollPassword(const short *pcm,
+                         unsigned long samples,
+                         CloudResult_t *result);
+int Cloud_EnrollName(const short *pcm,
+                     unsigned long samples,
+                     CloudResult_t *result);
 CloudCommand_t Cloud_DetectCommand(const short *pcmA,
                                    unsigned long samplesA,
                                    const short *pcmB,

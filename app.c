@@ -2,6 +2,7 @@
 #include "pin_mux_config.h"
 #include "ui.h"
 #include "pir_sensor.h"
+#include "common.h"
 #include "rom_map.h"
 #include "utils.h"
 #include "uart_if.h"

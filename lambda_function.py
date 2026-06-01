@@ -22,14 +22,16 @@ VOICE_MIN_HZ = 100
 VOICE_MAX_HZ = 4000
 FEATURE_LEN = 32
 
-USER_ID = 1
-PROFILE_KEY = f"profiles/user_{USER_ID}.json"
+PROFILE_PREFIX = "profiles/"
+PENDING_KEY = "profiles/pending_enroll.json"
 
 NOISY_AVG_ABS = 14000
 NOISY_PEAK_TO_PEAK = 62000
-QUIET_AVG_ABS = 20
+CLIPPED_AVG_ABS = 4000
+QUIET_AVG_ABS = 200
 QUIET_PEAK_TO_PEAK = 1000
-AUTH_PASS_SCORE = 75
+AUTH_PASS_SCORE = 91
+MAX_FEATURE_VALUE = 0.85
 
 TRANSCRIBE_WAIT_SECONDS = 26
 TRANSCRIBE_POLL_SECONDS = 2
@@ -91,7 +93,9 @@ def check_audio_level(audio_bytes):
     if avg_abs < QUIET_AVG_ABS or peak_to_peak < QUIET_PEAK_TO_PEAK:
         return "too_quiet", info
 
-    if avg_abs > NOISY_AVG_ABS or peak_to_peak > NOISY_PEAK_TO_PEAK:
+    if avg_abs > NOISY_AVG_ABS or (
+        peak_to_peak > NOISY_PEAK_TO_PEAK and avg_abs > CLIPPED_AVG_ABS
+    ):
         return "too_noisy", info
 
     return "ok", info
@@ -143,28 +147,107 @@ def cosine_score(features_a, features_b):
     return int(100 * np.dot(a, b) / denom)
 
 
-def load_profile():
-    try:
-        obj = s3.get_object(Bucket=BUCKET, Key=PROFILE_KEY)
-        return json.loads(obj["Body"].read().decode("utf-8"))
-    except Exception:
-        return None
+def features_are_usable(features):
+    return bool(features) and max(features) <= MAX_FEATURE_VALUE
 
 
-def save_profile(features):
+def profile_is_complete(profile):
+    return (
+        isinstance(profile.get("user_id"), int)
+        and profile.get("user_id", 0) > 0
+        and bool(profile.get("user_name"))
+        and bool(profile.get("password"))
+        and bool(profile.get("password_words"))
+        and features_are_usable(profile.get("features", []))
+    )
+
+
+def extract_words(transcript):
+    return re.findall(r"[a-z']+", transcript.lower())
+
+
+def clean_user_name(words):
+    if not words:
+        return ""
+
+    return words[0][:24]
+
+
+def profile_key(name):
+    safe_name = re.sub(r"[^a-z0-9_-]", "", name.lower())
+    return f"{PROFILE_PREFIX}{safe_name}.json"
+
+
+def put_json(key, data):
     s3.put_object(
         Bucket=BUCKET,
-        Key=PROFILE_KEY,
-        Body=json.dumps({"user_id": USER_ID, "features": features}),
+        Key=key,
+        Body=json.dumps(data),
         ContentType="application/json",
     )
 
 
-def clear_profile():
+def get_json(key):
+    obj = s3.get_object(Bucket=BUCKET, Key=key)
+    return json.loads(obj["Body"].read().decode("utf-8"))
+
+
+def delete_key(key):
     try:
-        s3.delete_object(Bucket=BUCKET, Key=PROFILE_KEY)
+        s3.delete_object(Bucket=BUCKET, Key=key)
     except Exception:
         pass
+
+
+def list_profiles():
+    profiles = []
+    response_data = s3.list_objects_v2(Bucket=BUCKET, Prefix=PROFILE_PREFIX)
+
+    for item in response_data.get("Contents", []):
+        key = item["Key"]
+        if key == PENDING_KEY or not key.endswith(".json"):
+            continue
+
+        try:
+            profile = get_json(key)
+        except Exception:
+            continue
+
+        if profile_is_complete(profile):
+            profiles.append(profile)
+
+    return profiles
+
+
+def clear_profiles():
+    response_data = s3.list_objects_v2(Bucket=BUCKET, Prefix=PROFILE_PREFIX)
+    for item in response_data.get("Contents", []):
+        delete_key(item["Key"])
+
+
+def status_response():
+    profiles = list_profiles()
+    return {
+        "ok": True,
+        "mode": "status",
+        "has_users": len(profiles) > 0,
+        "user_count": len(profiles),
+    }
+
+
+def save_audio(audio_bytes):
+    timestamp = int(time.time())
+    wav_key = f"uploads/{timestamp}_{uuid.uuid4().hex[:8]}.wav"
+    wav_bytes = make_wav_bytes(audio_bytes)
+
+    s3.put_object(
+        Bucket=BUCKET,
+        Key=wav_key,
+        Body=wav_bytes,
+        ContentType="audio/wav",
+    )
+
+    return wav_key
 
 
 def transcribe_english(wav_key):
@@ -207,108 +290,320 @@ def transcribe_english(wav_key):
     raise TimeoutError("transcription timed out")
 
 
-def choose_command(transcript):
-    words = re.findall(r"[a-z']+", transcript.lower())
-
-    if "apple" in words:
-        return "enroll", "apple"
-
-    if "clear" in words:
-        return "clear", "clear"
-
-    if words:
-        return "auth", words[0]
-
-    return "auth", ""
-
-
-def process_audio(audio_bytes, mode):
+def transcribe_audio(audio_bytes):
     audio_level, audio_info = check_audio_level(audio_bytes)
     if audio_level != "ok":
-        return {
+        return None, [], "", "", {
             "ok": False,
-            "mode": mode,
             "result": audio_level,
             "word": "",
+            "words": "",
             "audio": audio_info,
         }
 
-    timestamp = int(time.time())
-    wav_key = f"uploads/{timestamp}_{uuid.uuid4().hex[:8]}.wav"
-    wav_bytes = make_wav_bytes(audio_bytes)
-
-    s3.put_object(
-        Bucket=BUCKET,
-        Key=wav_key,
-        Body=wav_bytes,
-        ContentType="audio/wav",
-    )
-
+    wav_key = save_audio(audio_bytes)
     transcript = transcribe_english(wav_key)
-    command, word = choose_command(transcript)
-    features = extract_fft_features(audio_bytes)
+    words = extract_words(transcript)
+    words_text = " ".join(words)
+    word = words[0] if words else ""
 
-    if command == "enroll":
-        save_profile(features)
-        return {
-            "ok": True,
-            "mode": mode,
-            "wav_key": wav_key,
-            "transcript": transcript,
-            "word": word,
-            "command": "enroll",
-            "result": "enrolled",
-            "user_id": USER_ID,
-        }
+    return wav_key, words, words_text, word, None
 
-    if command == "clear":
-        clear_profile()
-        return {
-            "ok": True,
-            "mode": mode,
-            "wav_key": wav_key,
-            "transcript": transcript,
-            "word": word,
-            "command": "clear",
-            "result": "cleared",
-        }
 
-    profile = load_profile()
-    if profile is None:
-        return {
-            "ok": True,
-            "mode": mode,
-            "wav_key": wav_key,
-            "transcript": transcript,
-            "word": word,
-            "command": "auth",
-            "result": "fail",
-            "user_id": USER_ID,
-            "score": 0,
-        }
-
-    score = cosine_score(features, profile["features"])
-    passed = score >= AUTH_PASS_SCORE
-
+def fail_response(mode, wav_key, transcript, words_text, word, reason, score=0, command="auth"):
     return {
         "ok": True,
         "mode": mode,
         "wav_key": wav_key,
         "transcript": transcript,
+        "words": words_text,
         "word": word,
-        "command": "auth",
-        "result": "pass" if passed else "fail",
-        "user_id": USER_ID,
+        "command": command,
+        "result": "fail",
+        "reason": reason,
+        "user_id": 0,
         "score": score,
+        "user_name": "",
     }
+
+
+def audio_error_response(mode, audio_error, command="auth"):
+    reason = audio_error.get("result", "bad_audio")
+    return {
+        "ok": True,
+        "mode": mode,
+        "wav_key": "",
+        "transcript": "",
+        "words": "",
+        "word": "",
+        "command": command,
+        "result": "fail",
+        "reason": reason,
+        "user_id": 0,
+        "score": 0,
+        "user_name": "",
+        "audio": audio_error.get("audio", {}),
+    }
+
+
+def start_or_auth(audio_bytes, mode):
+    wav_key, words, words_text, word, audio_error = transcribe_audio(audio_bytes)
+    if audio_error:
+        return audio_error_response(mode, audio_error)
+
+    transcript = words_text
+
+    if not words:
+        return fail_response(mode, wav_key, transcript, words_text, word, "no_word")
+
+    if words == ["apple"]:
+        delete_key(PENDING_KEY)
+        return {
+            "ok": True,
+            "mode": mode,
+            "wav_key": wav_key,
+            "transcript": transcript,
+            "words": words_text,
+            "word": word,
+            "command": "enroll",
+            "result": "ready",
+            "reason": "say_password",
+            "user_id": 0,
+            "score": 0,
+            "user_name": "",
+        }
+
+    if words == ["clear"]:
+        clear_profiles()
+        return {
+            "ok": True,
+            "mode": mode,
+            "wav_key": wav_key,
+            "transcript": transcript,
+            "words": words_text,
+            "word": word,
+            "command": "clear",
+            "result": "cleared",
+            "user_id": 0,
+            "score": 0,
+            "user_name": "",
+        }
+
+    profiles = list_profiles()
+    if not profiles:
+        return fail_response(
+            mode,
+            wav_key,
+            transcript,
+            words_text,
+            word,
+            "no_enrolled_user",
+        )
+
+    features = extract_fft_features(audio_bytes)
+    if not features_are_usable(features):
+        return fail_response(mode, wav_key, transcript, words_text, word, "bad_audio")
+
+    best_score = 0
+    best_user = ""
+    password_matched = False
+
+    for profile in profiles:
+        profile_words = profile.get("password_words", [])
+        profile_features = profile.get("features", [])
+
+        if not features_are_usable(profile_features):
+            continue
+
+        score = cosine_score(features, profile_features)
+        if score > best_score:
+            best_score = score
+            best_user = profile.get("user_name", "")
+
+        if words != profile_words:
+            continue
+
+        password_matched = True
+        if score >= AUTH_PASS_SCORE:
+            return {
+                "ok": True,
+                "mode": mode,
+                "wav_key": wav_key,
+                "transcript": transcript,
+                "words": words_text,
+                "word": word,
+                "command": "auth",
+                "result": "pass",
+                "user_id": profile.get("user_id", 0),
+                "score": score,
+                "user_name": profile.get("user_name", ""),
+            }
+
+    reason = "voice_mismatch" if password_matched else "password_mismatch"
+    return fail_response(mode, wav_key, transcript, words_text, word, reason, best_score)
+
+
+def enroll_password(audio_bytes, mode):
+    wav_key, words, words_text, word, audio_error = transcribe_audio(audio_bytes)
+    if audio_error:
+        return audio_error_response(mode, audio_error, command="enroll")
+
+    if not words:
+        return fail_response(
+            mode,
+            wav_key,
+            words_text,
+            words_text,
+            word,
+            "no_password",
+            command="enroll",
+        )
+
+    if words == ["apple"]:
+        return fail_response(
+            mode,
+            wav_key,
+            words_text,
+            words_text,
+            word,
+            "password_cannot_be_apple",
+            command="enroll",
+        )
+
+    features = extract_fft_features(audio_bytes)
+    if not features_are_usable(features):
+        return fail_response(
+            mode,
+            wav_key,
+            words_text,
+            words_text,
+            word,
+            "bad_profile_audio",
+            command="enroll",
+        )
+
+    put_json(
+        PENDING_KEY,
+        {
+            "password": words_text,
+            "password_words": words,
+            "features": features,
+            "created_at": int(time.time()),
+        },
+    )
+
+    return {
+        "ok": True,
+        "mode": mode,
+        "wav_key": wav_key,
+        "transcript": words_text,
+        "words": words_text,
+        "word": word,
+        "command": "enroll",
+        "result": "password_saved",
+        "reason": "say_user_name",
+        "user_id": 0,
+        "score": 0,
+        "user_name": "",
+    }
+
+
+def enroll_name(audio_bytes, mode):
+    wav_key, words, words_text, word, audio_error = transcribe_audio(audio_bytes)
+    if audio_error:
+        return audio_error_response(mode, audio_error, command="enroll")
+
+    user_name = clean_user_name(words)
+    if user_name == "":
+        return fail_response(
+            mode,
+            wav_key,
+            words_text,
+            words_text,
+            word,
+            "no_user_name",
+            command="enroll",
+        )
+
+    try:
+        pending = get_json(PENDING_KEY)
+    except Exception:
+        return fail_response(mode, wav_key, words_text, words_text, word, "missing_password")
+
+    pending_password = pending.get("password", "")
+    pending_password_words = pending.get("password_words", [])
+    pending_features = pending.get("features", [])
+    if not pending_password or not pending_password_words or not features_are_usable(pending_features):
+        delete_key(PENDING_KEY)
+        return fail_response(
+            mode,
+            wav_key,
+            words_text,
+            words_text,
+            word,
+            "missing_password",
+            command="enroll",
+        )
+
+    user_id = max([profile.get("user_id", 0) for profile in list_profiles()] or [0]) + 1
+    profile = {
+        "user_id": user_id,
+        "user_name": user_name,
+        "password": pending_password,
+        "password_words": pending_password_words,
+        "features": pending_features,
+    }
+
+    if not profile_is_complete(profile):
+        return fail_response(
+            mode,
+            wav_key,
+            words_text,
+            words_text,
+            word,
+            "incomplete_profile",
+            command="enroll",
+        )
+
+    put_json(profile_key(user_name), profile)
+    delete_key(PENDING_KEY)
+
+    return {
+        "ok": True,
+        "mode": mode,
+        "wav_key": wav_key,
+        "transcript": words_text,
+        "words": words_text,
+        "word": word,
+        "command": "enroll",
+        "result": "enrolled",
+        "reason": "",
+        "user_id": user_id,
+        "score": 0,
+        "user_name": user_name,
+        "password": pending_password,
+    }
+
+
+def process_audio(audio_bytes, mode):
+    if mode == "enroll_password":
+        return enroll_password(audio_bytes, mode)
+
+    if mode == "enroll_name":
+        return enroll_name(audio_bytes, mode)
+
+    return start_or_auth(audio_bytes, mode)
 
 
 def lambda_handler(event, context):
     mode = (event.get("queryStringParameters") or {}).get("mode", "process")
     audio_bytes = get_audio_bytes(event)
 
+    if mode == "status":
+        return response(200, status_response())
+
     if mode == "clear":
-        clear_profile()
+        clear_profiles()
         return response(200, {"ok": True, "mode": mode, "result": "cleared"})
 
     if len(audio_bytes) == 0:

@@ -30,6 +30,10 @@ int Mic_RecordSeconds(short *pcmOut, unsigned long maxSamples, unsigned long sec
 void Mic_GetDmaStats(tMicCaptureStats *stats);
 void Mic_RunMonitor(void);
 
+#if MIC_ENABLE_RECORD_TEST
+void Mic_RunRecordTest(void);
+#endif
+
 #ifdef __cplusplus
 }
 #endif

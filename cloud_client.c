@@ -10,6 +10,9 @@
 #define CLOUD_HOST "hipazwfbtjr6ch7df6pcnljue40gbszk.lambda-url.us-east-1.on.aws"
 #define CLOUD_PORT 443
 #define CLOUD_PATH_PROCESS "/?mode=process"
+#define CLOUD_PATH_STATUS "/?mode=status"
+#define CLOUD_PATH_ENROLL_PASSWORD "/?mode=enroll_password"
+#define CLOUD_PATH_ENROLL_NAME "/?mode=enroll_name"
 #define CLOUD_PATH_DETECT "/?mode=detect"
 #define CLOUD_PATH_ENROLL "/?mode=enroll"
 #define CLOUD_PATH_AUTH "/?mode=auth"
@@ -23,7 +26,7 @@
 #define CLOUD_SECOND 0
 
 #define CLOUD_TX_HEADER_SIZE 384
-#define CLOUD_RX_SIZE 1024
+#define CLOUD_RX_SIZE 2048
 #define CLOUD_SEND_CHUNK_BYTES 1024
 
 static int gCloudSocket = -1;
@@ -100,6 +103,7 @@ static int Cloud_PostPcm(const char *path,
     char header[CLOUD_TX_HEADER_SIZE];
     long retVal;
     unsigned long bodyBytes = (samplesA + samplesB) * sizeof(short);
+    unsigned long received = 0;
 
     if((path == 0) || (response == 0) || (responseLen == 0)) {
         return -1;
@@ -153,15 +157,32 @@ static int Cloud_PostPcm(const char *path,
 
     UART_PRINT("Cloud: upload sent, waiting response...\n\r");
 
-    retVal = sl_Recv(gCloudSocket, response, responseLen - 1, 0);
-    if(retVal < 0) {
+    while(received < (responseLen - 1)) {
+        retVal = sl_Recv(gCloudSocket,
+                         response + received,
+                         responseLen - 1 - received,
+                         0);
+
+        if(retVal > 0) {
+            received += (unsigned long)retVal;
+            continue;
+        }
+
+        if(retVal == 0) {
+            break;
+        }
+
+        if(received > 0) {
+            break;
+        }
+
         UART_PRINT("Cloud: receive failed: %ld\n\r", retVal);
         sl_Close(gCloudSocket);
         gCloudSocket = -1;
         return (int)retVal;
     }
 
-    response[retVal] = '\0';
+    response[received] = '\0';
 
     UART_PRINT("Cloud: response received\n\r");
     UART_PRINT("%s\n\r", response);
@@ -243,19 +264,86 @@ static void ParseStringAfter(const char *response,
 
 static CloudCommand_t ParseCommand(const char *response)
 {
-    if(ResponseHas(response, "\"command\"") && ResponseHas(response, "\"enroll\"")) {
+    char command[16];
+
+    ParseStringAfter(response, "\"command\"", command, sizeof(command));
+
+    if(strcmp(command, "enroll") == 0) {
         return CLOUD_COMMAND_ENROLL;
     }
 
-    if(ResponseHas(response, "\"command\"") && ResponseHas(response, "\"clear\"")) {
+    if(strcmp(command, "clear") == 0) {
         return CLOUD_COMMAND_CLEAR;
     }
 
-    if(ResponseHas(response, "\"command\"") && ResponseHas(response, "\"auth\"")) {
+    if(strcmp(command, "auth") == 0) {
         return CLOUD_COMMAND_AUTHENTICATE;
     }
 
     return CLOUD_COMMAND_ERROR;
+}
+
+static int Cloud_ParseResult(const char *response, CloudResult_t *result)
+{
+    char status[16];
+
+    if((response == 0) || (result == 0)) {
+        return -1;
+    }
+
+    if(!ResponseHas(response, "\"ok\"") || !ResponseHas(response, "true")) {
+        UART_PRINT("Cloud: no valid result\n\r");
+        return -1;
+    }
+
+    memset(result, 0, sizeof(CloudResult_t));
+
+    result->ok = 1;
+    result->command = ParseCommand(response);
+    ParseStringAfter(response, "\"result\"", status, sizeof(status));
+    result->passed = (strcmp(status, "pass") == 0);
+    result->userId = ParseIntAfter(response, "\"user_id\"", 0);
+    result->score = ParseIntAfter(response, "\"score\"", 0);
+    ParseStringAfter(response, "\"word\"", result->word, sizeof(result->word));
+    ParseStringAfter(response, "\"words\"", result->words, sizeof(result->words));
+    ParseStringAfter(response, "\"transcript\"",
+                     result->transcript,
+                     sizeof(result->transcript));
+    ParseStringAfter(response, "\"reason\"", result->reason, sizeof(result->reason));
+    ParseStringAfter(response, "\"user_name\"",
+                     result->userName,
+                     sizeof(result->userName));
+    ParseStringAfter(response, "\"password\"",
+                     result->password,
+                     sizeof(result->password));
+
+    if((result->words[0] == '\0') && (result->transcript[0] != '\0')) {
+        strncpy(result->words, result->transcript, sizeof(result->words) - 1);
+        result->words[sizeof(result->words) - 1] = '\0';
+    }
+
+    UART_PRINT("Cloud: word = %s\n\r", result->word);
+    UART_PRINT("Cloud: words = %s\n\r", result->words);
+    if(result->userName[0] != '\0') {
+        UART_PRINT("Cloud: user_name = %s\n\r", result->userName);
+    }
+    if(result->password[0] != '\0') {
+        UART_PRINT("Cloud: password = %s\n\r", result->password);
+    }
+    if(result->reason[0] != '\0') {
+        UART_PRINT("Cloud: reason = %s\n\r", result->reason);
+    }
+    UART_PRINT("Cloud: command = %d result = %s user = %d score = %d\n\r",
+               result->command,
+               status,
+               result->userId,
+               result->score);
+
+    if(result->command == CLOUD_COMMAND_ERROR) {
+        return -1;
+    }
+
+    return 0;
 }
 
 int Cloud_Init(void)
@@ -291,6 +379,41 @@ int Cloud_Init(void)
     return 0;
 }
 
+int Cloud_CheckUsers(void)
+{
+    char response[CLOUD_RX_SIZE];
+    int retVal;
+    int userCount;
+
+    UART_PRINT("Cloud: checking enrolled users\n\r");
+
+    retVal = Cloud_PostPcm(CLOUD_PATH_STATUS,
+                           0,
+                           0,
+                           0,
+                           0,
+                           response,
+                           sizeof(response));
+    if(retVal < 0) {
+        UART_PRINT("Cloud: status POST failed: %d\n\r", retVal);
+        return retVal;
+    }
+
+    if(!ResponseHas(response, "\"ok\"") || !ResponseHas(response, "true")) {
+        UART_PRINT("Cloud: invalid status response\n\r");
+        return -1;
+    }
+
+    userCount = ParseIntAfter(response, "\"user_count\"", -1);
+    UART_PRINT("Cloud: user_count = %d\n\r", userCount);
+
+    if(userCount < 0) {
+        return -1;
+    }
+
+    return (userCount > 0) ? 1 : 0;
+}
+
 int Cloud_ProcessVoice(const short *pcm,
                        unsigned long samples,
                        CloudResult_t *result)
@@ -319,30 +442,63 @@ int Cloud_ProcessVoice(const short *pcm,
         return retVal;
     }
 
-    if(!ResponseHas(response, "\"ok\"") || !ResponseHas(response, "true")) {
-        UART_PRINT("Cloud: no valid result\n\r");
+    return Cloud_ParseResult(response, result);
+}
+
+int Cloud_EnrollPassword(const short *pcm,
+                         unsigned long samples,
+                         CloudResult_t *result)
+{
+    char response[CLOUD_RX_SIZE];
+    int retVal;
+
+    if(result == 0) {
         return -1;
     }
 
-    result->ok = 1;
-    result->command = ParseCommand(response);
-    result->passed = ResponseHas(response, "\"pass\"");
-    result->userId = ParseIntAfter(response, "\"user_id\"", 0);
-    result->score = ParseIntAfter(response, "\"score\"", 0);
-    ParseStringAfter(response, "\"word\"", result->word, sizeof(result->word));
+    UART_PRINT("Cloud: enroll password\n\r");
 
-    UART_PRINT("Cloud: word = %s\n\r", result->word);
-    UART_PRINT("Cloud: command = %d pass = %d user = %d score = %d\n\r",
-               result->command,
-               result->passed,
-               result->userId,
-               result->score);
+    retVal = Cloud_PostPcm(CLOUD_PATH_ENROLL_PASSWORD,
+                           pcm,
+                           samples,
+                           0,
+                           0,
+                           response,
+                           sizeof(response));
+    if(retVal < 0) {
+        UART_PRINT("Cloud: enroll password POST failed: %d\n\r", retVal);
+        return retVal;
+    }
 
-    if(result->command == CLOUD_COMMAND_ERROR) {
+    return Cloud_ParseResult(response, result);
+}
+
+int Cloud_EnrollName(const short *pcm,
+                     unsigned long samples,
+                     CloudResult_t *result)
+{
+    char response[CLOUD_RX_SIZE];
+    int retVal;
+
+    if(result == 0) {
         return -1;
     }
 
-    return 0;
+    UART_PRINT("Cloud: enroll name\n\r");
+
+    retVal = Cloud_PostPcm(CLOUD_PATH_ENROLL_NAME,
+                           pcm,
+                           samples,
+                           0,
+                           0,
+                           response,
+                           sizeof(response));
+    if(retVal < 0) {
+        UART_PRINT("Cloud: enroll name POST failed: %d\n\r", retVal);
+        return retVal;
+    }
+
+    return Cloud_ParseResult(response, result);
 }
 
 CloudCommand_t Cloud_DetectCommand(const short *pcmA,

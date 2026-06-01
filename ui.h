@@ -21,7 +21,13 @@ typedef enum {
 
 void UI_Init(void);
 void UI_ShowState(UIState_t state, int user_id, int score);
+void UI_ShowInitializing(void);
+void UI_ShowConnectingWifi(void);
+void UI_ShowWait(void);
 void UI_ShowWord(const char *word);
+void UI_ShowWords(const char *words);
+void UI_ShowWelcome(const char *name);
+void UI_ShowNoUser(void);
 
 #endif // UI_H
 

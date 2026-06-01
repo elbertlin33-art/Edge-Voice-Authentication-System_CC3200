@@ -42,11 +42,12 @@
 #define SPI_IF_BIT_RATE         1000000
 #define RECORD_SECONDS          3
 #define RECORD_SAMPLES          (MIC_SAMPLE_RATE_HZ * RECORD_SECONDS)
-#define RECORD_CHUNK_SAMPLES    DSP_FFT_INPUT_SAMPLES
-#define RUN_BOOT_UPLOAD_TEST    1
+#define RECORD_CHUNK_SAMPLES    MIC_SAMPLE_RATE_HZ
+#define RUN_BOOT_UPLOAD_TEST    0
 #define AUDIO_NOISY_AVG_ABS     14000
 #define AUDIO_NOISY_PEAK        62000
-#define AUDIO_QUIET_AVG_ABS     20
+#define AUDIO_CLIPPED_AVG_ABS   4000
+#define AUDIO_QUIET_AVG_ABS     200
 #define AUDIO_QUIET_PEAK        1000
 
 //*****************************************************************************
@@ -62,7 +63,7 @@ extern uVectorEntry __vector_table;
 #endif
 
 static short gPcmBuffer[RECORD_SAMPLES];
-static short gPcmChunk[RECORD_CHUNK_SAMPLES];
+static int gHasEnrolledUser = 0;
 
 //*****************************************************************************
 //                 GLOBAL VARIABLES -- End
@@ -78,6 +79,16 @@ static void DelayMs(unsigned long ms);
 static void App_ShowState(UIState_t state, int userId, int score);
 static int Audio_CheckSignal(const short *pcm, unsigned long samples);
 static int RecordThreeSecondClip(void);
+static int CaptureVoiceClip(void);
+static void App_ShowIdlePrompt(void);
+static void App_ShowNoUserPrompt(void);
+static int App_CheckCloudUsers(void);
+static int IsReason(const CloudResult_t *result, const char *reason);
+static int IsPasswordRetryReason(const CloudResult_t *result);
+static int IsNameRetryReason(const CloudResult_t *result);
+static void App_ShowCloudAudioRetry(const CloudResult_t *result);
+static void HandleNoUserEnrollmentPrompt(void);
+static void HandleEnrollFlow(void);
 static void HandleMotionEvent(void);
 
 //*****************************************************************************
@@ -198,6 +209,38 @@ static void App_ShowState(UIState_t state, int userId, int score)
     UI_ShowState(state, userId, score);
 }
 
+static void App_ShowIdlePrompt(void)
+{
+    App_ShowState(UI_STATE_IDLE, 0, 0);
+}
+
+static void App_ShowNoUserPrompt(void)
+{
+    UART_PRINT("STATE: NO_USER\n\r");
+    UART_PRINT("No existing profile, please enroll by saying apple\n\r");
+    UI_ShowNoUser();
+}
+
+static int App_CheckCloudUsers(void)
+{
+    int hasUsers;
+
+    hasUsers = Cloud_CheckUsers();
+    if(hasUsers < 0) {
+        App_ShowState(UI_STATE_AWS_ERROR, 0, 0);
+        return -1;
+    }
+
+    gHasEnrolledUser = hasUsers;
+    if(gHasEnrolledUser) {
+        UART_PRINT("Cloud profiles: enrolled user found\n\r");
+    } else {
+        UART_PRINT("Cloud profiles: no enrolled user\n\r");
+    }
+
+    return 0;
+}
+
 static int Audio_CheckSignal(const short *pcm, unsigned long samples)
 {
     tAudioStats stats;
@@ -217,7 +260,8 @@ static int Audio_CheckSignal(const short *pcm, unsigned long samples)
     }
 
     if((stats.avgAbs > AUDIO_NOISY_AVG_ABS) ||
-       (stats.peakToPeak > AUDIO_NOISY_PEAK)) {
+       ((stats.peakToPeak > AUDIO_NOISY_PEAK) &&
+        (stats.avgAbs > AUDIO_CLIPPED_AVG_ABS))) {
         UART_PRINT("Audio: too noisy\n\r");
         return UI_STATE_TOO_NOISY;
     }
@@ -237,37 +281,46 @@ static int Audio_CheckSignal(const short *pcm, unsigned long samples)
 static int RecordThreeSecondClip(void)
 {
     unsigned long totalCaptured = 0;
+    unsigned long chunkIndex;
     tMicCaptureStats stats;
 
     App_ShowState(UI_STATE_RECORDING, 0, 0);
     UART_PRINT("Mic: recording %d seconds...\n\r", RECORD_SECONDS);
+    UART_PRINT("START TALKING NOW\n\r");
 
-    while(totalCaptured < RECORD_SAMPLES) {
-        unsigned long want = RECORD_SAMPLES - totalCaptured;
+    for(chunkIndex = 0; chunkIndex < RECORD_SECONDS; chunkIndex++) {
         int captured;
 
-        if(want > RECORD_CHUNK_SAMPLES) {
-            want = RECORD_CHUNK_SAMPLES;
+        UART_PRINT("Mic: record chunk %lu / %d...\n\r",
+                   chunkIndex + 1,
+                   RECORD_SECONDS);
+
+        if(chunkIndex == 0) {
+            captured = Mic_RecordSamples(&gPcmBuffer[totalCaptured],
+                                         RECORD_SAMPLES - totalCaptured,
+                                         RECORD_CHUNK_SAMPLES);
+        } else {
+            captured = Mic_RecordMoreSamples(&gPcmBuffer[totalCaptured],
+                                             RECORD_SAMPLES - totalCaptured,
+                                             RECORD_CHUNK_SAMPLES);
         }
 
-        captured = (totalCaptured == 0)
-                 ? Mic_RecordSamples(gPcmChunk, RECORD_CHUNK_SAMPLES, want)
-                 : Mic_RecordMoreSamples(gPcmChunk, RECORD_CHUNK_SAMPLES, want);
-        UART_PRINT("captured=%d\n\r", captured);
+        UART_PRINT("Mic: chunk captured=%d\n\r", captured);
         if(captured <= 0) {
             UART_PRINT("Mic: chunk failed, captured=%d\n\r", captured);
             break;
         }
 
-        memcpy(&gPcmBuffer[totalCaptured], gPcmChunk, captured * sizeof(short));
         totalCaptured += (unsigned long)captured;
 
         UART_PRINT("Mic: captured %lu / %lu samples\n\r",
                    totalCaptured,
                    (unsigned long)RECORD_SAMPLES);
 
-        if((unsigned long)captured < want) {
-            UART_PRINT("Mic: short chunk, wanted=%lu got=%d\n\r", want, captured);
+        if(captured != RECORD_CHUNK_SAMPLES) {
+            UART_PRINT("Mic: short chunk, wanted=%lu got=%d\n\r",
+                       (unsigned long)RECORD_CHUNK_SAMPLES,
+                       captured);
             break;
         }
     }
@@ -278,8 +331,182 @@ static int RecordThreeSecondClip(void)
                stats.txDmaCount,
                stats.droppedSamples);
     UART_PRINT("Mic: audio bytes ready = %lu\n\r", totalCaptured * sizeof(short));
+    UART_PRINT("STOP TALKING\n\r");
 
     return (int)totalCaptured;
+}
+
+static int CaptureVoiceClip(void)
+{
+    int samplesRecorded;
+    int audioProblem;
+
+    samplesRecorded = RecordThreeSecondClip();
+    if(samplesRecorded != RECORD_SAMPLES) {
+        App_ShowState(UI_STATE_FAIL, 0, 0);
+        DelayMs(2000);
+        return -1;
+    }
+
+    audioProblem = Audio_CheckSignal(gPcmBuffer, RECORD_SAMPLES);
+    if(audioProblem != 0) {
+        App_ShowState((UIState_t)audioProblem, 0, 0);
+        DelayMs(2000);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int IsReason(const CloudResult_t *result, const char *reason)
+{
+    if((result == 0) || (reason == 0)) {
+        return 0;
+    }
+
+    return (strcmp(result->reason, reason) == 0);
+}
+
+static int IsPasswordRetryReason(const CloudResult_t *result)
+{
+    return (IsReason(result, "too_quiet") ||
+            IsReason(result, "too_noisy") ||
+            IsReason(result, "no_word") ||
+            IsReason(result, "no_password") ||
+            IsReason(result, "bad_profile_audio") ||
+            IsReason(result, "password_cannot_be_apple"));
+}
+
+static int IsNameRetryReason(const CloudResult_t *result)
+{
+    return (IsReason(result, "too_quiet") ||
+            IsReason(result, "too_noisy") ||
+            IsReason(result, "no_word") ||
+            IsReason(result, "no_user_name"));
+}
+
+static void App_ShowCloudAudioRetry(const CloudResult_t *result)
+{
+    if(IsReason(result, "too_noisy")) {
+        App_ShowState(UI_STATE_TOO_NOISY, 0, 0);
+    } else if(IsReason(result, "too_quiet")) {
+        App_ShowState(UI_STATE_TOO_QUIET, 0, 0);
+    } else {
+        App_ShowState(UI_STATE_FAIL, 0, result->score);
+    }
+
+    DelayMs(2000);
+}
+
+static void HandleEnrollFlow(void)
+{
+    CloudResult_t passwordResult;
+    CloudResult_t nameResult;
+
+    while(1) {
+        App_ShowState(UI_STATE_ENROLLING, 0, 0);
+        UART_PRINT("ENROLL: get ready to say password\n\r");
+        DelayMs(1000);
+
+        App_ShowState(UI_STATE_GET_READY, 0, 0);
+        DelayMs(1000);
+
+        if(CaptureVoiceClip() < 0) {
+            UART_PRINT("ENROLL: passphrase not clear, retrying password prompt\n\r");
+            continue;
+        }
+
+        App_ShowState(UI_STATE_UPLOADING, 0, 0);
+        if(Cloud_EnrollPassword(gPcmBuffer, RECORD_SAMPLES, &passwordResult) < 0) {
+            App_ShowState(UI_STATE_AWS_ERROR, 0, 0);
+            DelayMs(2000);
+            return;
+        }
+
+        if(IsPasswordRetryReason(&passwordResult)) {
+            UART_PRINT("ENROLL: password rejected: %s\n\r", passwordResult.reason);
+            App_ShowCloudAudioRetry(&passwordResult);
+            continue;
+        }
+
+        if(passwordResult.command != CLOUD_COMMAND_ENROLL) {
+            App_ShowState(UI_STATE_FAIL, 0, passwordResult.score);
+            DelayMs(2000);
+            return;
+        }
+
+        break;
+    }
+
+    UART_PRINT("Password words: %s\n\r", passwordResult.words);
+    UI_ShowWords(passwordResult.words);
+    DelayMs(2000);
+
+    while(1) {
+        UART_PRINT("ENROLL: get ready to say user name\n\r");
+        App_ShowState(UI_STATE_GET_READY, 0, 0);
+        DelayMs(1000);
+
+        if(CaptureVoiceClip() < 0) {
+            UART_PRINT("ENROLL: user name not clear, retrying name prompt\n\r");
+            continue;
+        }
+
+        App_ShowState(UI_STATE_UPLOADING, 0, 0);
+        if(Cloud_EnrollName(gPcmBuffer, RECORD_SAMPLES, &nameResult) < 0) {
+            App_ShowState(UI_STATE_AWS_ERROR, 0, 0);
+            DelayMs(2000);
+            return;
+        }
+
+        if(IsNameRetryReason(&nameResult)) {
+            UART_PRINT("ENROLL: name rejected: %s\n\r", nameResult.reason);
+            App_ShowCloudAudioRetry(&nameResult);
+            continue;
+        }
+
+        if(nameResult.command != CLOUD_COMMAND_ENROLL) {
+            App_ShowState(UI_STATE_FAIL, 0, nameResult.score);
+            DelayMs(2000);
+            return;
+        }
+
+        break;
+    }
+
+    UART_PRINT("User name: %s\n\r", nameResult.userName);
+    UART_PRINT("Saved password: %s\n\r", nameResult.password);
+    gHasEnrolledUser = 1;
+    App_ShowState(UI_STATE_ENROLLED, nameResult.userId, 0);
+    DelayMs(1500);
+    UI_ShowWelcome(nameResult.userName);
+    DelayMs(2000);
+}
+
+static void HandleNoUserEnrollmentPrompt(void)
+{
+    CloudResult_t cloudResult;
+
+    App_ShowNoUserPrompt();
+    DelayMs(1000);
+
+    if(CaptureVoiceClip() < 0) {
+        return;
+    }
+
+    App_ShowState(UI_STATE_UPLOADING, 0, 0);
+    if(Cloud_ProcessVoice(gPcmBuffer, RECORD_SAMPLES, &cloudResult) < 0) {
+        App_ShowState(UI_STATE_AWS_ERROR, 0, 0);
+        DelayMs(2000);
+        return;
+    }
+
+    if(cloudResult.command == CLOUD_COMMAND_ENROLL) {
+        HandleEnrollFlow();
+        return;
+    }
+
+    UART_PRINT("NO_USER: heard '%s', returning idle\n\r", cloudResult.words);
 }
 
 //*****************************************************************************
@@ -293,30 +520,16 @@ static int RecordThreeSecondClip(void)
 //*****************************************************************************
 static void HandleMotionEvent(void)
 {
-    int samplesRecorded;
-    int audioProblem;
     CloudResult_t cloudResult;
 
     App_ShowState(UI_STATE_GET_READY, 0, 0);
     DelayMs(1000);
 
-    samplesRecorded = RecordThreeSecondClip();
-
-    if(samplesRecorded != RECORD_SAMPLES) {
-        App_ShowState(UI_STATE_FAIL, 0, 0);
-        DelayMs(2000);
-        return;
-    }
-
-    audioProblem = Audio_CheckSignal(gPcmBuffer, RECORD_SAMPLES);
-    if(audioProblem != 0) {
-        App_ShowState((UIState_t)audioProblem, 0, 0);
-        DelayMs(2000);
+    if(CaptureVoiceClip() < 0) {
         return;
     }
 
     App_ShowState(UI_STATE_UPLOADING, 0, 0);
-    DelayMs(1000);
 
     if(Cloud_ProcessVoice(gPcmBuffer, RECORD_SAMPLES, &cloudResult) < 0) {
         App_ShowState(UI_STATE_AWS_ERROR, 0, 0);
@@ -324,23 +537,36 @@ static void HandleMotionEvent(void)
         return;
     }
 
+    if(strcmp(cloudResult.reason, "no_enrolled_user") == 0) {
+        gHasEnrolledUser = 0;
+        HandleNoUserEnrollmentPrompt();
+        return;
+    }
+
+    if((cloudResult.words[0] == '\0') ||
+       (strcmp(cloudResult.reason, "no_word") == 0)) {
+        UART_PRINT("No words detected, returning idle\n\r");
+        return;
+    }
+
     UART_PRINT("Word detected: %s\n\r", cloudResult.word);
-    UI_ShowWord(cloudResult.word);
-    DelayMs(1500);
+    UART_PRINT("Words from cloud: %s\n\r", cloudResult.words);
 
     if(cloudResult.command == CLOUD_COMMAND_ENROLL) {
-        App_ShowState(UI_STATE_ENROLLED, cloudResult.userId, 0);
-        DelayMs(2000);
+        HandleEnrollFlow();
     } else if(cloudResult.command == CLOUD_COMMAND_CLEAR) {
+        gHasEnrolledUser = 0;
         App_ShowState(UI_STATE_CLEARED, 0, 0);
         DelayMs(2000);
+        HandleNoUserEnrollmentPrompt();
     } else if(cloudResult.command == CLOUD_COMMAND_AUTHENTICATE) {
-        App_ShowState(UI_STATE_PROCESSING, 0, 0);
-        DelayMs(1000);
         if(cloudResult.passed) {
             App_ShowState(UI_STATE_PASS, cloudResult.userId, cloudResult.score);
+            DelayMs(1500);
+            UI_ShowWelcome(cloudResult.userName);
         } else {
-            App_ShowState(UI_STATE_FAIL, 0, 0);
+            UART_PRINT("Result: Fail (%d%%)\n\r", cloudResult.score);
+            App_ShowState(UI_STATE_FAIL, cloudResult.userId, cloudResult.score);
         }
         DelayMs(2000);
     } else {
@@ -369,13 +595,28 @@ void main()
 
     OLED_SPIInit();
     UI_Init();
-    App_ShowState(UI_STATE_PROCESSING, 0, 0);
+    UART_PRINT("STATE: INITIALIZING\n\r");
+    UI_ShowInitializing();
+    DelayMs(500);
 
+    UART_PRINT("STATE: CONNECTING_WIFI\n\r");
+    UI_ShowConnectingWifi();
     lRetVal = Cloud_Init();
     if(lRetVal < 0) {
         App_ShowState(UI_STATE_FAIL, 0, 0);
         UART_PRINT("Unable to initialize cloud client\n\r");
         LOOP_FOREVER();
+    }
+
+    UART_PRINT("STATE: WAIT\n\r");
+    UI_ShowWait();
+    if(App_CheckCloudUsers() < 0) {
+        UART_PRINT("Unable to check cloud profiles\n\r");
+        LOOP_FOREVER();
+    }
+
+    if(!gHasEnrolledUser) {
+        App_ShowNoUserPrompt();
     }
 
     PIR_Init();
@@ -387,19 +628,31 @@ void main()
         LOOP_FOREVER();
     }
 
-    App_ShowState(UI_STATE_IDLE, 0, 0);
+    App_ShowIdlePrompt();
 
 #if RUN_BOOT_UPLOAD_TEST
     UART_PRINT("TEST: running one recording/upload without PIR\n\r");
     HandleMotionEvent();
-    App_ShowState(UI_STATE_IDLE, 0, 0);
+    App_ShowIdlePrompt();
 #endif
 
     while(1) {
         if(PIR_MotionDetected()) {
             UART_PRINT("PIR: motion detected\n\r");
-            HandleMotionEvent();
-            App_ShowState(UI_STATE_IDLE, 0, 0);
+
+            if(!gHasEnrolledUser) {
+                if(App_CheckCloudUsers() < 0) {
+                    UART_PRINT("Unable to check cloud profiles\n\r");
+                } else if(!gHasEnrolledUser) {
+                    HandleNoUserEnrollmentPrompt();
+                } else {
+                    HandleMotionEvent();
+                }
+            } else {
+                HandleMotionEvent();
+            }
+
+            App_ShowIdlePrompt();
             UART_PRINT("PIR: signal after idle = %d\n\r", PIR_MotionDetected());
         } else {
             DelayMs(100);
